@@ -1392,17 +1392,14 @@ fn an_interrupted_install_leaves_no_half_keg_behind() {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect()
     };
+    // A keg at the version path may still lack its receipt when the kill hit
+    // the finishing steps: the receipt is written last, so such a keg counts
+    // as not installed and the next install redoes it.
     for name in rack_entries(&rack) {
         assert!(
             name == version || name.starts_with(".fastbrew-"),
             "unexpected {name:?} in the rack"
         );
-        if name == version {
-            assert!(
-                rack.join(&name).join("INSTALL_RECEIPT.json").is_file(),
-                "a keg that landed is complete"
-            );
-        }
     }
 
     // `cleanup` sweeps whatever staging directory the kill left behind.
@@ -1413,8 +1410,8 @@ fn an_interrupted_install_leaves_no_half_keg_behind() {
         .collect();
     assert!(leftovers.is_empty(), "cleanup left {leftovers:?}");
 
-    // And a fresh install puts the prefix right again.
-    let _ = std::fs::remove_dir_all(&rack);
+    // And installing again puts the prefix right, whatever the kill left:
+    // nothing, a receiptless keg, or a complete one.
     ok(&sb, &["install", "pcre2"]);
     assert!(
         keg(&sb, "pcre2", &version)
@@ -2274,6 +2271,34 @@ fn leftover_links_from_a_killed_run_do_not_block_a_fresh_install() {
             .join("INSTALL_RECEIPT.json")
             .is_file()
     );
+    assert!(sb.prefix.join("bin/hello").exists());
+    assert!(sb.prefix.join("var/homebrew/linked/hello").is_symlink());
+    assert_eq!(
+        ok(&sb, &["list", "--versions", "hello"]).trim(),
+        format!("hello {version}")
+    );
+}
+
+/// The deterministic form of the kill test's worst case: a keg that exists
+/// without its receipt (finishing was interrupted) is not an installed keg.
+/// `cleanup` copes with it and the next install completes it.
+#[test]
+fn a_receiptless_keg_is_redone_by_the_next_install() {
+    let sb = sandbox_or_skip!();
+    network_or_skip!();
+
+    ok(&sb, &["install", "hello"]);
+    let version = api_pkg_version("hello");
+    let receipt = keg(&sb, "hello", &version).join("INSTALL_RECEIPT.json");
+    std::fs::remove_file(&receipt).expect("drop the receipt");
+
+    ok(&sb, &["cleanup", "hello"]);
+    let out = ok(&sb, &["install", "hello"]);
+    assert!(
+        !out.contains("already installed"),
+        "a receiptless keg must not count as installed: {out}"
+    );
+    assert!(receipt.is_file(), "the install completed");
     assert!(sb.prefix.join("bin/hello").exists());
     assert!(sb.prefix.join("var/homebrew/linked/hello").is_symlink());
     assert_eq!(
