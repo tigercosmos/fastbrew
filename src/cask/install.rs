@@ -363,7 +363,14 @@ fn install_staged(
 ) -> Result<()> {
     let version = cask.version.clone().unwrap_or_else(|| "latest".to_string());
     output::ohai(&format!("Installing Cask {}", cask.token));
-    let specs = artifacts::artifact_specs(cfg, dirs, cask);
+    // An artifact the options skip (`--no-binaries`) is never installed, so it
+    // must not reach the receipt either: `uninstall_artifacts` is what a later
+    // uninstall reverses, and reversing a link this install never made would
+    // remove whatever else owns that target.
+    let specs: Vec<ArtifactSpec> = artifacts::artifact_specs(cfg, dirs, cask)
+        .into_iter()
+        .filter(|spec| !artifacts::skipped_by_options(spec, opts.artifact_options()))
+        .collect();
     let uninstall_artifacts = artifacts::specs_to_json(&specs);
 
     stage(cfg, cask, download, &ctx.staged_path, opts.verbose)?;

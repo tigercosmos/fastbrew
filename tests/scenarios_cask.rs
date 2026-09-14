@@ -1073,6 +1073,90 @@ fn a_binary_artifact_will_not_overwrite_an_existing_file() {
     assert!(!env.appdir().join(app).exists());
 }
 
+/// `--no-binaries` installs no `Artifact::Binary`, so the receipt must not
+/// record one either: an uninstall reverses what the receipt lists, and the
+/// target of a binary stanza (`bin/<generic name>`) is easy for something else
+/// to own. Unlinking only ever removes a link this cask's install created
+/// (`Symlinked#target_links_to_source?`).
+#[test]
+fn no_binaries_neither_records_nor_unlinks_a_foreign_binary() {
+    let env = env_or_skip!();
+    let token = "fastbrew-no-binaries";
+    let app = "FastbrewNoBinaries.app";
+    let extra =
+        format!("  binary \"{app}/Contents/MacOS/demo\", target: \"fastbrew-shared-tool\"\n");
+    let url = fixture_url(token, "1.0");
+    let sha = env.seed_app_zip(&url, app, "1.0");
+    env.write_cask(token, &app_cask_rb(token, "1.0", &url, &sha, app, &extra));
+
+    // Something else already owns the target the binary stanza would take.
+    let unrelated = env.sandbox.home.join("unrelated-command");
+    std::fs::write(&unrelated, "#!/bin/sh\necho not ours\n").expect("write the other command");
+    let target = env.sandbox.prefix.join("bin/fastbrew-shared-tool");
+    std::fs::create_dir_all(target.parent().expect("bin")).expect("mkdir bin");
+    std::os::unix::fs::symlink(&unrelated, &target).expect("link the other command");
+
+    let out = env.run(&["install", "--cask", "--no-binaries", token]);
+    assert!(
+        out.status.success(),
+        "`--no-binaries` install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_link(&target).expect("still a symlink"),
+        unrelated,
+        "the install replaced a link it was told not to create"
+    );
+
+    // The receipt records what was installed, so the binary is not in it.
+    let receipt: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(env.caskroom(token).join(".metadata/INSTALL_RECEIPT.json"))
+            .expect("read the receipt"),
+    )
+    .expect("parse the receipt");
+    let kinds: Vec<String> = receipt["uninstall_artifacts"]
+        .as_array()
+        .expect("uninstall_artifacts")
+        .iter()
+        .filter_map(|a| a.as_object())
+        .flat_map(|a| a.keys().cloned().collect::<Vec<String>>())
+        .collect();
+    assert_eq!(kinds, ["app"], "a skipped binary was recorded: {receipt}");
+
+    let out = env.run(&["uninstall", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "uninstall failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_link(&target).expect("the other command's link survives"),
+        unrelated,
+        "uninstall removed a symlink this cask never created"
+    );
+
+    // The same cask installed with its binaries links, and unlinks, its own.
+    std::fs::remove_file(&target).expect("drop the other command's link");
+    let out = env.run(&["install", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_link(&target).expect("the cask's own link"),
+        env.caskroom(token)
+            .join(format!("1.0/{app}/Contents/MacOS/demo")),
+    );
+    let out = env.run(&["uninstall", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "uninstall failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!target.is_symlink(), "the cask's own link was left behind");
+}
+
 /// An app the user deleted by hand still leaves Caskroom records, and
 /// `uninstall` has to clean them up rather than refuse.
 #[test]

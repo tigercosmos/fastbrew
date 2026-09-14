@@ -434,6 +434,15 @@ pub fn install_artifacts(
     install_specs(cfg, dirs, &artifact_specs(cfg, dirs, cask), &ctx, opts)
 }
 
+/// `Cask::Installer#install_artifacts`: `--no-binaries` installs no
+/// `Artifact::Binary`, and `command_wrapper` subclasses it.
+///
+/// An artifact the options skip is never installed, so it is neither recorded
+/// in the receipt nor reversed by an uninstall.
+pub fn skipped_by_options(spec: &ArtifactSpec, opts: ArtifactOptions) -> bool {
+    opts.skip_binaries && matches!(spec.kind.as_str(), "binary" | "command_wrapper")
+}
+
 /// Install `specs` in order, reverting the ones already installed on failure
 /// (`Cask::Installer#install_artifacts`).
 pub fn install_specs(
@@ -445,9 +454,7 @@ pub fn install_specs(
 ) -> Result<()> {
     let mut installed: Vec<&ArtifactSpec> = Vec::new();
     for spec in specs {
-        // `--no-binaries` skips `Artifact::Binary`, and `command_wrapper`
-        // subclasses it.
-        if matches!(spec.kind.as_str(), "binary" | "command_wrapper") && opts.skip_binaries {
+        if skipped_by_options(spec, opts) {
             continue;
         }
         if let Err(error) = install_one(cfg, dirs, spec, ctx, opts) {
@@ -858,6 +865,30 @@ fn conflicting_formula(cfg: &Config, target: &Path) -> Option<String> {
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
 }
 
+/// `Symlinked#target_links_to_source?`: whether the link at `target` is the one
+/// this cask's install created. A dangling link still counts, because the
+/// source going away is exactly what an uninstall in progress looks like.
+fn target_links_to_source(target: &Path, source: &Path) -> bool {
+    let Ok(link) = std::fs::read_link(target) else {
+        return false;
+    };
+    if link == source {
+        return true;
+    }
+    match (std::fs::canonicalize(target), std::fs::canonicalize(source)) {
+        (Ok(resolved), Ok(source)) => resolved == source,
+        _ => false,
+    }
+}
+
+/// `Symlinked#link_action`'s second ownership test: the link resolves into this
+/// cask's own Caskroom entry, so an older version's staged path counts too.
+fn target_links_into_caskroom(target: &Path, ctx: &CaskContext) -> bool {
+    std::fs::canonicalize(target)
+        .ok()
+        .is_some_and(|resolved| resolved.starts_with(&ctx.caskroom_path))
+}
+
 fn unlink_artifact(
     cfg: &Config,
     dirs: &CaskDirs,
@@ -870,6 +901,13 @@ fn unlink_artifact(
         return Ok(());
     }
     if conflicting_formula(cfg, &target).is_some() {
+        return Ok(());
+    }
+    // The link at the target is not necessarily ours: `--no-binaries` never
+    // created one, and a target name as generic as `bin/tool` is easy for
+    // something else to own. Only a link this cask points at goes.
+    let source = artifact_source(ctx, spec)?;
+    if !target_links_to_source(&target, &source) && !target_links_into_caskroom(&target, ctx) {
         return Ok(());
     }
     let name = english_name(&spec.kind);

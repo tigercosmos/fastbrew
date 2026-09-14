@@ -344,7 +344,12 @@ read both shapes, write the current one. `uninstall_artifacts` lists the
 artifacts that have an uninstall phase (plus `zap`) in v2 JSON form, with
 `$APPDIR`/`$HOMEBREW_PREFIX`/`$HOME` resolved but `~` left alone, and blank
 arguments dropped. `pkg`, `installer` and `generated_script` have no uninstall
-phase and are not listed.
+phase and are not listed. Difference from Homebrew: an artifact the install
+skipped is not listed either, so a `--no-binaries` install records no `binary`
+or `command_wrapper` entry. Homebrew records them regardless and its uninstall
+then removes whatever symlink sits at the target; fastbrew records only what it
+installed and unlinks only a symlink that points at this cask
+(`Symlinked#target_links_to_source?`).
 
 `config.json`: `{"default": {"languages": [..], "appdir": "/Applications", "appimagedir": "~/Applications", "keyboard_layoutdir": "/Library/Keyboard Layouts", "colorpickerdir": "~/Library/ColorPickers", "prefpanedir": "~/Library/PreferencePanes", "qlplugindir": "~/Library/QuickLook", "mdimporterdir": "~/Library/Spotlight", "dictionarydir": "~/Library/Dictionaries", "fontdir": "~/Library/Fonts", "servicedir": "~/Library/Services", "input_methoddir": "~/Library/Input Methods", "internet_plugindir": "~/Library/Internet Plug-Ins", "audio_unit_plugindir": "~/Library/Audio/Plug-Ins/Components", "vst_plugindir": "~/Library/Audio/Plug-Ins/VST", "vst3_plugindir": "~/Library/Audio/Plug-Ins/VST3", "screen_saverdir": "~/Library/Screen Savers"}, "env": {..from HOMEBREW_CASK_OPTS..}, "explicit": {..from flags..}}` with `~` expanded. `binarydir` is `$PREFIX/bin`, `manpagedir` is `$PREFIX/share/man`, completions go to `$PREFIX/etc/bash_completion.d`, `$PREFIX/share/zsh/site-functions`, `$PREFIX/share/fish/vendor_completions.d`.
 
