@@ -424,3 +424,11 @@ fastbrew-specific: `FASTBREW_BREW` (path to the Ruby `brew` for delegation),
 `FASTBREW_REQUIRE_SANDBOX=1` (refuse the standard prefixes),
 `FASTBREW_NO_DELEGATE=1` (fail instead of delegating), `FASTBREW_LOG`
 (tracing filter).
+
+`FASTBREW_REQUIRE_SANDBOX=1` also constrains delegation: `delegate::find_brew`
+skips the `PATH` fallback entirely and refuses any candidate whose canonical
+path lies under `/opt/homebrew`, `/usr/local` or
+`/home/linuxbrew/.linuxbrew`, so only `FASTBREW_BREW` or a `brew` inside the
+sandbox prefix is ever executed. `scripts/sandbox.sh` exports
+`FASTBREW_NO_DELEGATE=1`, or `FASTBREW_BREW=<sandbox prefix>/bin/brew` once
+`scripts/sandbox.sh brew` has cloned a Ruby Homebrew into the sandbox.
