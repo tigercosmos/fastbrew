@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# A/B benchmark: fastbrew vs the Ruby Homebrew, both inside the sandbox.
-# Usage: scripts/bench.sh [DIR]   (DIR as in scripts/sandbox.sh)
+# A/B benchmark: fastbrew vs the Ruby Homebrew, both inside the same sandbox.
+# Usage: scripts/bench.sh [DIR] [-- extra "cmd args" ...]
+# DIR defaults to target/sandbox-ab. A sandboxed Homebrew clone is created on
+# first use (scripts/sandbox.sh brew). Nothing touches the host's Homebrew.
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 sandbox="$repo_root/scripts/sandbox.sh"
-dir="${1:-${FASTBREW_SANDBOX:-$repo_root/target/sandbox}}"
+dir="${1:-${FASTBREW_SANDBOX:-$repo_root/target/sandbox-ab}}"
 
 cargo build --release --manifest-path "$repo_root/Cargo.toml" >/dev/null
 fb="$repo_root/target/release/fastbrew"
@@ -13,23 +15,31 @@ fb="$repo_root/target/release/fastbrew"
 eval "$("$sandbox" env "$dir")"
 brew="$dir/prefix/bin/brew"
 
-# Warm both: brew installs portable ruby on first run.
-"$brew" --version >/dev/null 2>&1 || true
-"$fb" update --quiet >/dev/null 2>&1 || true
+# Warm both: brew installs portable ruby and builds its caches on first use.
+"$brew" info jq >/dev/null 2>&1 || true
+"$brew" search --desc json >/dev/null 2>&1 || true
+"$fb" info jq >/dev/null 2>&1 || true
 
-run() {
-  local label="$1"; shift
-  if command -v hyperfine >/dev/null; then
-    hyperfine -N --warmup 2 --runs 10 -n "brew $label" "$brew $*" -n "fastbrew $label" "$fb $*" 2>&1 | grep -E 'Time|brew|fastbrew|±' | sed 's/^/  /'
-  else
-    printf '%-28s' "brew $label"; { /usr/bin/time -p "$brew" "$@" >/dev/null 2>/dev/null; } 2>&1 | awk '/real/{print $2 "s"}'
-    printf '%-28s' "fastbrew $label"; { /usr/bin/time -p "$fb" "$@" >/dev/null 2>/dev/null; } 2>&1 | awk '/real/{print $2 "s"}'
-  fi
-}
+python3 - "$brew" "$fb" "$@" <<'PY'
+import subprocess, sys, time, statistics
+brew, fb = sys.argv[1], sys.argv[2]
+cases = ["info jq", "search --desc json", "deps --tree jq", "list", "outdated",
+         "uses --installed openssl@3", "leaves", "search ripgrep", "--version"]
+extra = [a for a in sys.argv[3:] if a != "--"]
+cases += extra
 
-run "info jq" info jq
-run "search --desc json" search --desc json
-run "deps --tree jq" deps --tree jq
-run "list" list
-run "outdated" outdated
-run "uses --installed openssl@3" uses --installed openssl@3
+def run(exe, args, n):
+    times = []
+    for _ in range(n):
+        t = time.perf_counter()
+        subprocess.run([exe, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        times.append(time.perf_counter() - t)
+    return statistics.median(times) * 1000
+
+print(f"{'command':<30} {'brew (ms)':>10} {'fastbrew (ms)':>14} {'speedup':>9}")
+for c in cases:
+    args = c.split()
+    b = run(brew, args, 3)
+    f = run(fb, args, 10)
+    print(f"{c:<30} {b:>10.1f} {f:>14.1f} {b / f:>8.0f}x")
+PY
