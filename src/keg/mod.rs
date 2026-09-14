@@ -59,19 +59,43 @@ impl Keg {
     }
 }
 
-/// `(files, bytes)`: regular files and symlinks (not directories) under `path`, sizes of regular files.
+/// `(files, bytes)` counted exactly as `DiskUsageExtension#compute_disk_usage`
+/// does: every non-directory entry is a file (`.DS_Store` excluded from the
+/// count), directories and directory symlinks contribute their own `lstat`
+/// size, and a hardlinked inode is only counted once. `brew info`, the install
+/// summary and `Uninstalling ...` all print this pair, so it has to agree with
+/// Homebrew byte for byte.
 pub fn disk_usage(path: &Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(top) = std::fs::symlink_metadata(path) else {
+        return (0, 0);
+    };
+    if top.file_type().is_symlink() && !path.exists() {
+        return (1, 0);
+    }
+    if !path.is_dir() {
+        return (1, std::fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+    }
+
     let mut files = 0u64;
     let mut bytes = 0u64;
+    let mut seen: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
+    // `Pathname#find` yields the root itself as well, and measures with `lstat`,
+    // so a symlink counts its own size rather than its target's.
     for entry in walkdir::WalkDir::new(path).into_iter().flatten() {
-        let ft = entry.file_type();
-        if ft.is_dir() {
+        let Ok(md) = entry.path().symlink_metadata() else {
+            continue;
+        };
+        let ft = md.file_type();
+        if ft.is_dir() || (ft.is_symlink() && entry.path().is_dir()) {
+            bytes += md.len();
             continue;
         }
-        files += 1;
-        if ft.is_file()
-            && let Ok(md) = entry.metadata()
-        {
+        if entry.file_name() != std::ffi::OsStr::new(".DS_Store") {
+            files += 1;
+        }
+        if seen.insert((md.dev(), md.ino())) {
             bytes += md.len();
         }
     }
@@ -187,13 +211,35 @@ pub fn disk_usage_readable(bytes: u64) -> String {
 }
 
 /// Write `data` to `path` via a temp file in the same directory and rename.
+///
+/// `Pathname#atomic_write` keeps an existing file's mode and gives a new one
+/// `0666 & ~umask` (0644 for a normal umask); the temp file it is built from
+/// would otherwise be 0600, which would leave receipts unreadable to everyone
+/// but the installing user.
 pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
+    let existing_mode = std::fs::metadata(path).ok().map(|m| m.permissions().mode());
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     std::io::Write::write_all(&mut tmp, data)?;
+    let mode = existing_mode.unwrap_or(0o666 & !umask());
+    tmp.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(mode))?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// The process umask, read without changing it for longer than the call takes.
+fn umask() -> u32 {
+    // SAFETY: `umask` cannot fail; it is restored immediately. Two threads
+    // racing here would both end up restoring the same original value.
+    unsafe {
+        let current = libc::umask(0o022);
+        libc::umask(current);
+        current as u32
+    }
 }
 
 /// Create `dst` as a symlink to `src` expressed relative to `dst`'s directory

@@ -205,15 +205,30 @@ indent, key order as below; keys `built_prefix`, `padded_prefix`,
 ```
 
 Rules: `changed_files`, `linkage_files`, `binary_relocation_files`,
-`source_modified_time`, `compiler`, `built_on`, `built_prefix`,
-`padded_prefix` come from the manifest tab. `installed_as_dependency` is also
-written (true when not requested explicitly). `runtime_dependencies` lists the
-full transitive runtime closure in dependency order, `declared_directly` true
-for direct deps, each with the installed pkg_version. `homebrew_version`: use
-the Homebrew version fastbrew emulates (constant, currently `6.0.22`); do not
+`source_modified_time`, `compiler`, `stdlib`, `built_on`, `built_prefix`,
+`padded_prefix` come from the manifest tab, falling back to the receipt the
+bottle itself ships when the annotation is absent or was built for another OS
+(`Utils::Bottles.load_tab`). `installed_as_dependency` is *not* written:
+Homebrew 6's `Tab#to_json` dropped it (`tab.rb` calls it "the long-removed
+`installed_as_dependency`") and receipts written by 6.0.x have no such key.
+Receipts from Homebrew 4 and 5 still carry it, so it is read and preserved
+when an old receipt is rewritten. `runtime_dependencies` lists the full
+transitive runtime closure in dependency order, `declared_directly` true for
+direct deps, each with the installed pkg_version. `homebrew_version`: use the
+Homebrew version fastbrew emulates (constant, currently `6.0.22`); do not
 append text, Homebrew parses it as a `Version`. `time` is install time in
 seconds. `source.path` is the API file path. `installed_on_request` is false
 for dependencies.
+
+The receipt is written with `Pathname#atomic_write`, which keeps an existing
+file's mode and gives a new one `0666 & ~umask` (0644 normally), not the 0600
+a temporary file would default to.
+
+`N files, SIZE` (`Pathname#abv`, printed by `info`, the install summary line
+and `Uninstalling ...`) comes from `DiskUsageExtension#compute_disk_usage`:
+every non-directory entry counts as a file except `.DS_Store`, the byte total
+adds the `lstat` size of directories and symlinks as well as files, and a
+hardlinked inode is counted once. The count is omitted when it is 1.
 
 ## 4. Relocation
 
@@ -441,7 +456,17 @@ exit status at 0.
 `list`: names in columns like `ls -C` on a TTY, one per line otherwise.
 `list --versions`: `name version [version ...]`. `outdated`: names; with
 `--verbose`: `name (installed) < current [pinned at x]`. Install progress:
-`==> Fetching hello`, `==> Downloading https://ghcr.io/v2/homebrew/core/hello/manifests/2.12.3-1`, `Already downloaded: <path>` or a progress bar, `==> Pouring hello--2.12.3.arm64_tahoe.bottle.1.tar.gz`, `==> Caveats` block, `🍺  /opt/homebrew/Cellar/hello/2.12.3: 8 files, 186KB`. Dependencies print `==> Installing dependencies for jq: oniguruma` then `==> Installing jq dependency: oniguruma`, and after everything `==> Installing jq`. Uninstall prints `Uninstalling /opt/homebrew/Cellar/hello/2.12.3... (8 files, 186KB)`. Dependents block: `Error: Refusing to uninstall /opt/homebrew/Cellar/oniguruma/6.9.10\nbecause it is required by jq, which is currently installed.\nYou can override this and force removal with:\n  brew uninstall --ignore-dependencies oniguruma`.
+`==> Fetching hello`, `==> Downloading https://ghcr.io/v2/homebrew/core/hello/manifests/2.12.3-1`, `Already downloaded: <path>` or a progress bar, `==> Pouring hello--2.12.3.arm64_tahoe.bottle.1.tar.gz`, `🍺  /opt/homebrew/Cellar/hello/2.12.3: 8 files, 186KB`. `Pouring` names the bottle, not the hashed cache file it was read from. Dependencies print `==> Installing dependencies for jq: oniguruma` then `==> Installing jq dependency: oniguruma`, and after everything `==> Installing jq`; with several formulae named, each gets its own heading listing only its own dependencies. Uninstall prints `Uninstalling /opt/homebrew/Cellar/hello/2.12.3... (8 files, 186KB)`, and `--force` prints the rack's *name*: `Uninstalling hello... (8 files, 186KB)`. Dependents block: `Error: Refusing to uninstall /opt/homebrew/Cellar/oniguruma/6.9.10\nbecause it is required by jq, which is currently installed.\nYou can override this and force removal with:\n  brew uninstall --ignore-dependencies oniguruma`.
+
+Caveats come last, after the summary line and after `==> Running `brew cleanup
+<name>`...`: `Homebrew::Install.finish_installation` cleans up and then calls
+`Messages#display_messages(force_caveats: true)`, which prints one `==> Caveats`
+heading, the shared completion and Emacs Lisp notices, and then each package's
+own caveats under an `==> <name>` heading — even when only one package was
+installed. `install/check.rb` decides the already-installed messages, and
+whether each is `opoo` (`Warning:`) or `onoe` (`Error:`); `ofail`ed blocks
+(a named pinned formula in `upgrade`, a failed `brew link` step) print their
+text and make the command exit 1 without any extra line.
 
 ## 10. Environment variables honored
 

@@ -56,7 +56,12 @@ pub struct FormulaReceipt {
     pub poured_from_bottle: bool,
     pub loaded_from_api: bool,
     pub loaded_from_internal_api: bool,
-    pub installed_as_dependency: bool,
+    /// Dropped by Homebrew 6 (`Tab#to_json` no longer writes it) but still
+    /// present in receipts written by Homebrew 4 and 5. Keep it when reading
+    /// one so rewriting does not change an old receipt's shape, and leave it
+    /// out of the receipts fastbrew creates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_as_dependency: Option<bool>,
     pub installed_on_request: bool,
     pub changed_files: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
