@@ -413,6 +413,37 @@ fn relocates_the_build_prefix_of_a_fixed_cellar_bottle() {
 }
 
 #[test]
+fn fetch_all_keeps_input_order_and_isolates_failures() {
+    let Some(cfg) = sandbox() else { return };
+    if !network() {
+        return;
+    }
+    let mut broken = HELLO.reference(&cfg);
+    broken.sha256 = "0".repeat(64);
+    let refs = vec![ONIGURUMA.reference(&cfg), broken, ACK.reference(&cfg)];
+    // `ack` is served under the `all` tag.
+    let mut refs = refs;
+    refs[2].tag = fastbrew::platform::BottleTag::all();
+
+    let results = fetch::fetch_all(&cfg, &refs, true);
+    assert_eq!(results.len(), 3);
+    let (manifest, blob) = results[0].as_ref().expect("oniguruma");
+    assert_eq!(manifest.bottle_size, Some(458_385));
+    assert!(
+        blob.to_string_lossy()
+            .ends_with("oniguruma--6.9.10.arm64_tahoe.bottle.tar.gz")
+    );
+    let err = results[1].as_ref().unwrap_err().to_string();
+    assert!(err.contains("bottle checksum"), "{err}");
+    let (_, ack_blob) = results[2].as_ref().expect("ack");
+    assert!(
+        ack_blob
+            .to_string_lossy()
+            .ends_with("ack--3.10.0.all.bottle.tar.gz")
+    );
+}
+
+#[test]
 fn reuses_a_cached_blob_without_redownloading() {
     let Some(cfg) = sandbox() else { return };
     if !network() {
