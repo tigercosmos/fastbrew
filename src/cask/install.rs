@@ -58,15 +58,14 @@ impl CaskInstallOptions {
 pub fn install_casks(
     cfg: &Config,
     index: &Index,
-    tokens: &[String],
+    casks: &[CaskEntry],
     opts: &CaskInstallOptions,
 ) -> Result<()> {
     let mut failed: Vec<String> = Vec::new();
-    for token in tokens {
-        let cask = crate::resolve::resolve_cask(cfg, index, token)?;
+    for cask in casks {
         let _lock = crate::keg::lock::lock_cask(cfg, &cask.token)?;
         let dirs = CaskDirs::resolve(cfg, &opts.explicit_dir_flags);
-        if let Err(error) = install_cask_entry(cfg, Some(index), &dirs, &cask, opts) {
+        if let Err(error) = install_cask_entry(cfg, Some(index), &dirs, cask, opts) {
             output::onoe(&format!("{}: {error}", cask.full_token()));
             failed.push(cask.full_token());
         }
@@ -84,28 +83,32 @@ pub fn install_casks(
 pub fn upgrade_casks(
     cfg: &Config,
     index: &Index,
-    tokens: &[String],
+    casks: &[CaskEntry],
     greedy: bool,
     opts: &CaskInstallOptions,
 ) -> Result<()> {
-    let named = !tokens.is_empty();
-    let targets: Vec<String> = if named {
-        tokens.to_vec()
+    // An empty list is `brew upgrade --cask` with no arguments: every
+    // installed cask, resolved through the Caskroom's own tokens.
+    let named = !casks.is_empty();
+    let targets: Vec<CaskEntry> = if named {
+        casks.to_vec()
     } else {
         super::installed_casks(cfg)
             .into_iter()
-            .map(|c| c.token)
+            .filter_map(|c| crate::resolve::resolve_cask(cfg, index, &c.token).ok())
             .collect()
     };
 
     let mut upgrades: Vec<(CaskEntry, InstalledCask)> = Vec::new();
-    for token in &targets {
-        let cask = crate::resolve::resolve_cask(cfg, index, token)?;
+    for cask in targets {
         let Some(installed) = super::installed_cask(cfg, &cask.token) else {
             if !named {
                 continue;
             }
-            return Err(Error::user(format!("Cask '{token}' is not installed.")));
+            return Err(Error::user(format!(
+                "Cask '{}' is not installed.",
+                cask.token
+            )));
         };
         // `Cask::Upgrade.outdated_casks`: a cask named on the command line is
         // checked greedily, the sweep over every installed cask is not.
@@ -163,10 +166,9 @@ pub fn upgrade_casks(
     Ok(())
 }
 
-pub fn fetch_casks(cfg: &Config, index: &Index, tokens: &[String], force: bool) -> Result<()> {
-    for token in tokens {
-        let cask = crate::resolve::resolve_cask(cfg, index, token)?;
-        fetch_cask_entry(cfg, &cask, force)?;
+pub fn fetch_casks(cfg: &Config, casks: &[CaskEntry], force: bool) -> Result<()> {
+    for cask in casks {
+        fetch_cask_entry(cfg, cask, force)?;
     }
     Ok(())
 }

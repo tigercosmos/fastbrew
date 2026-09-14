@@ -348,3 +348,71 @@ fn a_failed_predecessor_uninstall_restores_the_installed_version() {
         "1.0 is still what an upgrade would replace:\n{plan}"
     );
 }
+
+// ----------------------------------------------------- tap qualification
+
+/// `user/repo/token` has to reach the cask engine as the tap's entry: naming
+/// the fixture tap's `rectangle` must plan version 99.0, never core's.
+#[test]
+fn a_tap_qualified_cask_is_the_one_that_is_installed() {
+    let env = env_or_skip!();
+    let core_version = match support::api_index().and_then(|i| i.cask("rectangle")) {
+        Some(cask) => cask.version.expect("rectangle is versioned"),
+        None => {
+            eprintln!("the API index has no rectangle cask; skipping");
+            return;
+        }
+    };
+    assert_ne!(core_version, "99.0", "the fixture has to shadow core");
+
+    let app = "FastbrewTapRectangle.app";
+    let url = fixture_url("rectangle", "99.0");
+    let sha = env.seed_app_zip(&url, app, "99.0");
+    env.write_cask(
+        "rectangle",
+        &app_cask_rb("rectangle", "99.0", &url, &sha, app, ""),
+    );
+
+    // The bare token is still core's cask; `FromNameLoader` checks it first.
+    let core = env.stdout(&["info", "--cask", "rectangle"]);
+    assert!(
+        core.starts_with(&format!("==> rectangle (Rectangle): {core_version}")),
+        "{core}"
+    );
+
+    // The qualified token is the tap's.
+    let tapped = env.stdout(&["info", "--cask", "fixture/casks/rectangle"]);
+    assert!(
+        tapped.starts_with("==> fixture/casks/rectangle (rectangle fixture): 99.0"),
+        "{tapped}"
+    );
+
+    let plan = env.combined(&["install", "--cask", "--dry-run", "fixture/casks/rectangle"]);
+    assert!(
+        plan.contains("Would install cask fixture/casks/rectangle 99.0"),
+        "the plan follows the qualified token:\n{plan}"
+    );
+
+    // ... and the install itself uses the tap's entry.
+    let out = env.run(&["install", "--cask", "fixture/casks/rectangle"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        env.stdout(&["list", "--cask", "--versions"]),
+        "rectangle 99.0\n"
+    );
+    assert!(env.appdir().join(app).is_dir());
+
+    // The qualified token also reaches `uninstall`.
+    let out = env.run(&["uninstall", "--cask", "fixture/casks/rectangle"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!env.appdir().join(app).exists());
+    assert_eq!(env.stdout(&["list", "--cask"]), "");
+}

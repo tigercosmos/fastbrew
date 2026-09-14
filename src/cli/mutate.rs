@@ -28,21 +28,25 @@ fn kind_of(formula: bool, cask: bool) -> Kind {
 
 /// Split names into resolved formulae and casks.
 ///
-/// The resolved formula entry is what reaches `ops`, not its bare name:
+/// The resolved entry is what reaches `ops` and `cask`, not its bare name:
 /// re-resolving `user/repo/jq` downstream would give core's `jq`, because the
-/// API loader runs before any tap loader.
+/// API loader runs before any tap loader, and the same holds for a cask a tap
+/// qualifies.
 fn partition(
     ctx: &Ctx,
     names: &[String],
     kind: Kind,
-) -> Result<(Vec<crate::model::FormulaEntry>, Vec<String>)> {
+) -> Result<(
+    Vec<crate::model::FormulaEntry>,
+    Vec<crate::model::CaskEntry>,
+)> {
     let index = ctx.index()?;
     let mut formulae = Vec::new();
     let mut casks = Vec::new();
     for name in names {
         match resolve::resolve(&ctx.cfg, index, name, kind)? {
             resolve::Resolved::Formula(f) => formulae.push(f),
-            resolve::Resolved::Cask(c) => casks.push(c.token),
+            resolve::Resolved::Cask(c) => casks.push(c),
         }
     }
     Ok((formulae, casks))
@@ -237,7 +241,7 @@ pub fn uninstall(ctx: &Ctx, args: &UninstallArgs) -> Result<()> {
             force: args.force,
             dry_run: args.dry_run,
         };
-        crate::cask::uninstall::uninstall_casks(&ctx.cfg, index, &casks, opts)?;
+        crate::cask::uninstall::uninstall_casks(&ctx.cfg, &casks, opts)?;
     }
     Ok(())
 }
@@ -585,7 +589,7 @@ pub fn fetch(ctx: &Ctx, args: &FetchArgs) -> Result<()> {
         crate::ops::install::fetch_formulae(&ctx.cfg, index, &formulae, args.deps, args.force)?;
     }
     if !casks.is_empty() {
-        crate::cask::install::fetch_casks(&ctx.cfg, index, &casks, args.force)?;
+        crate::cask::install::fetch_casks(&ctx.cfg, &casks, args.force)?;
     }
     Ok(())
 }
