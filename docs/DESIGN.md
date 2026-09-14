@@ -135,7 +135,9 @@ Native (first release), with Homebrew's flags where they matter:
 `check_for_unlinked_but_not_keg_only` and a fastbrew-specific
 `check_missing_opt_links`), lists them with `--list-checks`, and hands any
 other named check to `brew doctor`. Findings print Homebrew's preamble and
-exit 1; a clean prefix prints `Your system is ready to brew.`
+exit 1; a clean prefix prints `Your system is ready to brew.` In place of
+Homebrew's support-tier message, a run with findings ends by pointing at
+`brew doctor` for the full set of checks.
 
 Delegated to `brew` (with a one-line notice on stderr):
 
