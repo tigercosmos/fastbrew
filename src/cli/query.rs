@@ -1439,8 +1439,12 @@ fn render_deps(ctx: &Ctx, index: &Index, names: &[String], args: &DepsArgs) -> V
         .collect()
 }
 
-fn annotations(index: &Index, _name: &str, _args: &DepsArgs) -> String {
-    let _ = index;
+/// Annotations for the flat `deps` listing.
+///
+/// KNOWN GAP: a flat listing loses which dependent declared the dependency
+/// (the list can be an intersection or union of several roots), so tags are
+/// only rendered by `--tree`, which keeps that context.
+fn annotations(_index: &Index, _name: &str, _args: &DepsArgs) -> String {
     String::new()
 }
 
