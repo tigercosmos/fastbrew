@@ -610,8 +610,10 @@ fn conflict_message(cfg: &Config, keg: &Keg, src: &Path, dst: &Path) -> String {
             dst.display()
         ),
     };
+    // `ConflictError#to_s` joins its parts with "\n"; `suggestion` already
+    // ends with one, so the blank line before the next paragraph is real.
     format!(
-        "Could not symlink {}\n\nTarget {}\n\n{suggestion}\n\
+        "Could not symlink {}\nTarget {}\n{suggestion}\n\
          To force the link and overwrite all conflicting files:\n  brew link --overwrite {}\n\n\
          To list all files that would be deleted:\n  brew link --overwrite {} --dry-run\n",
         relative_path(src, &keg.path).display(),
@@ -1156,28 +1158,19 @@ mod tests {
         std::fs::write(f.cfg.prefix.join("bin/other"), b"someone else\n").unwrap();
 
         let err = link(&f.cfg, &keg, &[], LinkOptions::default()).unwrap_err();
-        let text = err.to_string();
-        assert!(text.starts_with("Could not symlink bin/other"), "{text}");
-        assert!(
-            text.contains("already exists. You may want to remove it:"),
-            "{text}"
-        );
-        assert!(
-            text.contains(&format!(
-                "  rm '{}'",
-                f.cfg.prefix.join("bin/other").display()
-            )),
-            "{text}"
-        );
-        assert!(
-            text.contains("To force the link and overwrite all conflicting files:\n  brew link --overwrite demo"),
-            "{text}"
-        );
-        assert!(
-            text.contains(
-                "To list all files that would be deleted:\n  brew link --overwrite demo --dry-run"
-            ),
-            "{text}"
+        let dst = f.cfg.prefix.join("bin/other");
+        // Byte-for-byte `Keg::ConflictError#to_s`.
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Could not symlink bin/other\n\
+                 Target {}\n\
+                 already exists. You may want to remove it:\n  rm '{}'\n\n\
+                 To force the link and overwrite all conflicting files:\n  brew link --overwrite demo\n\n\
+                 To list all files that would be deleted:\n  brew link --overwrite demo --dry-run\n",
+                dst.display(),
+                dst.display()
+            )
         );
         // Everything linked before the conflict was rolled back.
         assert!(!f.cfg.prefix.join("bin/demo").exists());

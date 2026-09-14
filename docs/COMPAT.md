@@ -161,7 +161,12 @@ Cache naming (shared with Homebrew):
 - `$PREFIX/opt/<name>` -> relative symlink `../Cellar/<name>/<version>` (also for each alias and each oldname).
 - `$PREFIX/var/homebrew/linked/<name>` -> relative symlink `../../../Cellar/<name>/<version>`, present only when linked (not for keg-only).
 - `$PREFIX/var/homebrew/pinned/<name>` -> relative symlink to the pinned keg. `pinned_casks/<token>` likewise for casks.
-- Locks: `$PREFIX/var/homebrew/locks/<name>.formula.lock` (`flock(LOCK_EX|LOCK_NB)`; on failure print `Error: <name> is already locked by another process`).
+- Locks: `$PREFIX/var/homebrew/locks/<name>.formula.lock` (`flock(LOCK_EX|LOCK_NB)`), and `<token>.cask.lock` for casks. The locked path named in the error is the rack (`$CELLAR/<name>`) or `$PREFIX/Caskroom/<token>`, not the lock file. On contention Homebrew raises `OperationInProgressError` (`exceptions.rb`), printed as:
+
+  ```text
+  Error: A `brew` process has already locked <locked path>.
+  Please wait for it to finish or terminate it to continue.
+  ```
 
 `INSTALL_RECEIPT.json` written after pouring a bottle (pretty JSON, 2-space
 indent, key order as below; keys `built_prefix`, `padded_prefix`,
@@ -212,13 +217,29 @@ for dependencies.
 ## 4. Relocation
 
 Placeholders inside bottles: `@@HOMEBREW_PREFIX@@`, `@@HOMEBREW_CELLAR@@`,
-`@@HOMEBREW_REPOSITORY@@`, `@@HOMEBREW_LIBRARY@@`, `@@HOMEBREW_PERL@@`
-(-> `$PREFIX/opt/perl/bin/perl`), `@@HOMEBREW_JAVA@@` (-> `$PREFIX/opt/<openjdk dep name>/libexec`, only when a runtime dependency matches `openjdk(@n)?`).
+`@@HOMEBREW_REPOSITORY@@`, `@@HOMEBREW_LIBRARY@@`, `@@HOMEBREW_PERL@@` and
+`@@HOMEBREW_JAVA@@`. The last two expand differently on macOS
+(`extend/os/mac/keg_relocate.rb#prepare_relocation_to_locations`) than in the
+generic code, and macOS wins:
+
+- `@@HOMEBREW_PERL@@` -> `$PREFIX/opt/perl/bin/perl` when the formula is `perl`
+  or lists `perl` as a directly declared runtime dependency; otherwise
+  `/usr/bin/perl<tab.built_on.preferred_perl>` when that file exists, else
+  `/usr/bin/perl<MacOS.preferred_perl_version>` (`5.34` on Sonoma and newer,
+  `5.30` before). Only the generic (Linux) code uses
+  `$PREFIX/opt/perl/bin/perl` unconditionally.
+- `@@HOMEBREW_JAVA@@` -> `$PREFIX/opt/<openjdk dep name>/libexec/openjdk.jdk/Contents/Home`
+  on macOS (the generic code stops at `libexec`), and only when a runtime
+  dependency matches `openjdk(@n)?`.
+
+Only `@@HOMEBREW_PREFIX@@` and `@@HOMEBREW_CELLAR@@` are ever expanded in
+Mach-O install names, and only at the start of a name (`relocated_name_for`);
+all six are expanded in text files.
 
 Per cellar kind (from the API `bottle_cellar`):
 
 1. `:any_skip_relocation` (key absent): do nothing.
-2. `:any`: text replacement of placeholders in the files listed in the tab's `changed_files` (all files when the key is missing: scan text files and `.la`/`.lai`/`.pc`... libtool files). Hardlinked files are rewritten once and re-linked. Then Mach-O relocation of `linkage_files` (all Mach-O files when the key is missing): replace placeholders in `LC_ID_DYLIB`, `LC_LOAD_DYLIB`/`LC_LOAD_WEAK_DYLIB`/`LC_REEXPORT_DYLIB`/`LC_LOAD_UPWARD_DYLIB` names and `LC_RPATH` paths; handle fat binaries; keep load command sizes 8-byte aligned; if the new string does not fit in the existing command and the header pad is exhausted, fall back to `install_name_tool`. Re-sign every modified file: `codesign --sign - --force --preserve-metadata=entitlements,requirements,flags,runtime <file>` (parallel across files).
+2. `:any`: text replacement of placeholders in the files listed in the tab's `changed_files` (all files when the key is missing: scan text files and `.la`/`.lai`/`.pc`... libtool files). Hardlinked files are rewritten once and re-linked. Then Mach-O relocation of `linkage_files` (all Mach-O files when the key is missing): replace placeholders in `LC_ID_DYLIB`, `LC_LOAD_DYLIB`/`LC_LOAD_WEAK_DYLIB`/`LC_REEXPORT_DYLIB`/`LC_LOAD_UPWARD_DYLIB` names and `LC_RPATH` paths; handle fat binaries; keep load command sizes 8-byte aligned; if the new string does not fit in the existing command and the header pad is exhausted, fall back to `install_name_tool`. The header pad ends at the first section's file offset (`MachOFile#low_fileoff`); an edit never changes the file's size, it rebuilds the load-command region in place and NUL-pads the slack. Note that modern `install_name_tool` (Xcode 26) also refuses to grow load commands past the pad ("larger updated load commands do not fit"), so that fallback only helps with layouts the in-place editor rejects; a bottle whose pad is genuinely exhausted cannot be relocated, and Homebrew fails the pour there too (ruby-macho raises `HeaderPadError` out of `change_install_name`). Re-sign every modified file: `codesign --sign - --force --preserve-metadata=entitlements,requirements,flags,runtime <file>` (parallel across files).
 3. Fixed cellar (`/opt/homebrew/Cellar`): steps of 2, then if `$PREFIX` differs from the bottle's built prefix (`built_prefix` when `padded_prefix` is true, otherwise the cellar's parent), rewrite raw prefix strings inside binaries listed in `binary_relocation_files` (NUL-terminated C strings only, valid UTF-8, no control chars, at most 16384 bytes, new prefix padded with NULs or extra `/` to keep the byte length; refuse when the new prefix is longer than the old one) and re-sign. Padded prefix constant on macOS arm64: `"/opt/homebrew/.brew-padded-arm64"` left-justified with `_` to 64 bytes. Record `relocated_build_prefix` and `relocated_files` in the receipt. Otherwise Homebrew refuses to pour: `<name> was built for /opt/homebrew and can only be relocated to a prefix with a maximum length of 13 characters`.
 
 Afterwards, absolute symlinks whose target starts with the build prefix or
@@ -231,12 +252,27 @@ its cellar are rewritten to relative links against our prefix.
 - `etc`: create directories (`mkpath`), link files.
 - `bin`, `sbin`: link files directly inside; do not descend into subdirectories.
 - `include`: link (subtree symlink) except `postgresql@N` -> mkpath.
-- `share`: `info/*.info(.gz)` and `info/dir` are info files (link, then run `install-info`); skip `locale/locale.alias` and `icons/**/icon-theme.cache`; mkpath for `locale/**`, `icons/**`, `zsh/**`, `fish/**`, `pwsh/**`, `lua/**`, `guile/**`, `postgresql@N/**`, `pypy/**`, `aclocal`, `doc`, `info`, `java`, `javadoc`, `locale`, `man`, `man/man[1-8]`, `man/cat[1-8]`, `applications`, `gnome`, `gnome/help`, `icons`, `mime-info`, `pixmaps`, `sounds`, `postgresql`, `cmake`, `emacs`, `emacs/site-lisp`, `pkgconfig`, `bash-completion`, `bash-completion/completions`, `elisp`, `metainfo`, `nvim`, `nvim/site`, `nvim/site/pack`, `nvim/site/pack/homebrew`, `nvim/site/pack/homebrew/start`, `fish/vendor_completions.d`, `zsh/site-functions`; everything else: link.
+- `share`: `info/*.info(.gz)` and `info/dir` are info files (link, then run `install-info`); skip `locale/locale.alias` and `icons/**/icon-theme.cache`; mkpath for anything matching `(locale|man)/<lang>[_TT][.codeset][@modifier]`, `icons/**`, `zsh*`, `fish*`, `pwsh*`, `lua/**`, `guile/**`, `postgresql@N*`, `pypy*` and for the exact paths in `Keg::SHARE_PATHS`: `aclocal`, `cps`, `doc`, `info`, `java`, `locale`, `man`, `man/man[1-8]`, `man/cat[1-8]`, `applications`, `gnome`, `gnome/help`, `icons`, `mime`, `mime/packages`, `mime-info`, `pixmaps`, `postgresql`, `sounds`; everything else: link. The prefix rules are unanchored regexes, so everything below a match is mkpath too (`share/locale/de/LC_MESSAGES` and `lib/python3.N/site-packages` are real directories in a real prefix). `javadoc`, `cmake`, `emacs`, `pkgconfig`, `bash-completion`, `elisp`, `metainfo` and `nvim` are *not* in `SHARE_PATHS` and are linked as directories.
 - `lib`: skip `charset.alias`; mkpath for `cps`, `pkgconfig`, `cmake`, `dtrace`, `gdk-pixbuf*`, `ghc`, `gio*`, `lua*`, `mecab*`, `node*`, `ocaml*`, `perl5*`, `php`, `postgresql@N`, `pypy*`, `python[23].N*`, `R*`, `ruby*`; else link.
 - `Frameworks`: `X.framework` and `X.framework/Versions` -> mkpath, else link.
 - Skip `.DS_Store`, `.pyc/.pyo` inside `site-packages`, sources whose resolved path already is the destination, and sources resolving into another keg's `opt` path. Prune `.app` directories (never link them).
 - A destination that is a symlink into another keg's directory is resolved by converting it to a real directory and linking that keg's files into it (`resolve_any_conflicts`).
-- Conflict (destination exists and is not ours): abort with `Error: Could not symlink <rel>` / `Target <dst> already exists. You may want to remove it:` / `  rm '<dst>'` / `To force the link and overwrite all conflicting files:` / `  brew link --overwrite <name>` / `To list all files that would be deleted:` / `  brew link --overwrite --dry-run <name>`. `--overwrite` deletes the destination first. Roll back links created so far on failure.
+- Conflict (destination exists and is not ours): abort with `Keg::ConflictError`, whose parts are joined with `\n` so the "Target" line is followed by the suggestion on its own line:
+
+  ```text
+  Error: Could not symlink <src relative to the keg>
+  Target <dst>
+  already exists. You may want to remove it:
+    rm '<dst>'
+
+  To force the link and overwrite all conflicting files:
+    brew link --overwrite <name>
+
+  To list all files that would be deleted:
+    brew link --overwrite <name> --dry-run
+  ```
+
+  When `<dst>` resolves into another keg the middle paragraph is `is a symlink belonging to <other>. You can unlink it:` / `  brew unlink <other>` instead. `--overwrite` deletes the destination first; a destination covered by `link_overwrite_paths` is moved to `$CACHE/Backup/<path relative to the prefix>` and restored if the link fails. Roll back links created so far on failure.
 - `unlink` removes every symlink in the prefix that resolves into the keg and prunes empty directories, then removes the linked record. Info files are unregistered with `install-info --delete`.
 
 Keg-only reasons text: `:versioned_formula` -> "this is an alternate version of another formula"; `:provided_by_macos` -> "macOS already provides this software and installing another version in\nparallel can cause all kinds of trouble"; `:shadowed_by_macos` -> "macOS provides similar software and installing this software in\nparallel can cause all kinds of trouble"; a string is used verbatim. Caveat text: `<name> is keg-only, which means it was not symlinked into <prefix>,\nbecause <reason>.` followed by PATH / LDFLAGS / CPPFLAGS / PKG_CONFIG_PATH hints when `bin`, `lib`, `include`, `lib/pkgconfig` exist.

@@ -417,31 +417,41 @@ fn relocate_dynamic_linkage(
     repl: &Replacements,
 ) -> Result<Vec<String>> {
     let map = |old: &str| repl.install_name(old);
-    let changed: Vec<PathBuf> = files
+    let outcomes: Vec<(PathBuf, Result<bool>)> = files
         .par_iter()
-        .filter_map(|file| {
+        .map(|file| {
             let modified =
                 super::with_writable(file, || match macho::rewrite_install_names(file, &map) {
                     Ok(modified) => Ok(modified),
+                    // The load commands no longer fit before the first section.
                     Err(macho::MachOError::NoHeaderPad { .. }) => {
                         install_name_tool_fallback(file, &map)
                     }
                     Err(e) => Err(e.into()),
                 });
-            match modified {
-                Ok(true) => Some(file.clone()),
-                Ok(false) => None,
-                Err(e) => {
-                    crate::output::opoo(&format!("Could not relocate {}: {e}", file.display()));
-                    None
-                }
-            }
+            (file.clone(), modified)
         })
         .collect();
-    let refs: Vec<&Path> = changed.iter().map(PathBuf::as_path).collect();
-    codesign::codesign_files(&refs)?;
+
+    // Sign what did change before reporting a failure, so the keg is never
+    // left holding a modified file with a stale signature.
+    let changed: Vec<&Path> = outcomes
+        .iter()
+        .filter(|(_, r)| matches!(r, Ok(true)))
+        .map(|(f, _)| f.as_path())
+        .collect();
+    codesign::codesign_files(&changed)?;
     let mut names: Vec<String> = changed.iter().map(|f| relative_to(keg, f)).collect();
     names.sort();
+
+    // Homebrew re-raises a `MachO::MachOError` out of `change_install_name`,
+    // failing the pour rather than installing half-relocated linkage.
+    if let Some((file, Err(e))) = outcomes.iter().find(|(_, r)| r.is_err()) {
+        return Err(Error::user(format!(
+            "Failed changing install names in {}\n{e}",
+            file.display()
+        )));
+    }
     Ok(names)
 }
 
@@ -478,17 +488,17 @@ fn install_name_tool_fallback(file: &Path, map: &dyn Fn(&str) -> Option<String>)
     if args.is_empty() {
         return Ok(false);
     }
-    let status = std::process::Command::new("/usr/bin/install_name_tool")
+    let out = std::process::Command::new("/usr/bin/install_name_tool")
         .args(&args)
         .arg(file)
-        .status()
+        .output()
         .map_err(|e| {
             Error::Other(anyhow::Error::new(e).context("running /usr/bin/install_name_tool"))
         })?;
-    if !status.success() {
+    if !out.status.success() {
         return Err(Error::user(format!(
-            "install_name_tool failed on {}",
-            file.display()
+            "install_name_tool failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
     Ok(true)
@@ -1178,6 +1188,74 @@ mod tests {
         assert_eq!(repl.install_name("@loader_path/liba.dylib"), None);
         assert_eq!(repl.install_name("/usr/lib/libSystem.B.dylib"), None);
         assert_eq!(repl.install_name("@@HOMEBREW_LIBRARY@@/x"), None);
+    }
+
+    #[test]
+    fn falls_back_to_install_name_tool_without_a_header_pad() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_test(tmp.path());
+        let keg = cfg.cellar.join("demo/1.0");
+        std::fs::create_dir_all(keg.join("lib")).unwrap();
+        if !Path::new("/usr/bin/clang").exists()
+            || !Path::new("/usr/bin/install_name_tool").exists()
+        {
+            eprintln!("skipping: no clang or install_name_tool");
+            return;
+        }
+        std::fs::write(tmp.path().join("g.c"), "int g(void){return 7;}\n").unwrap();
+        let dylib = keg.join("lib/libg.dylib");
+        // `-headerpad 0` leaves no room to grow the load commands, so the
+        // in-place editor must hand over to `install_name_tool`.
+        assert!(
+            std::process::Command::new("/usr/bin/clang")
+                .args(["-dynamiclib", "-o"])
+                .arg(&dylib)
+                .arg(tmp.path().join("g.c"))
+                .args([
+                    "-install_name",
+                    "@@HOMEBREW_PREFIX@@/lib/libg.dylib",
+                    "-Wl,-headerpad,0",
+                ])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repl = Replacements::new(&cfg, None, None, None);
+        let map = |old: &str| repl.install_name(old);
+        assert!(matches!(
+            macho::rewrite_install_names(&dylib, &map),
+            Err(macho::MachOError::NoHeaderPad { .. })
+        ));
+
+        let tab = BottleTab {
+            changed_files: Some(vec![]),
+            linkage_files: Some(vec!["lib/libg.dylib".into()]),
+            ..Default::default()
+        };
+        let result = relocate_keg(
+            &cfg,
+            RelocateArgs {
+                keg_path: &keg,
+                cellar_kind: &BottleCellar::Any,
+                tab: &tab,
+                openjdk_dep: None,
+            },
+        );
+        // `install_name_tool` refuses to grow past the header pad too (it no
+        // longer relays the file out), so the pour fails the way Homebrew's
+        // does when ruby-macho raises `HeaderPadError` — but the file is left
+        // intact rather than half-rewritten.
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("Failed changing install names in "),
+            "{err}"
+        );
+        assert_eq!(
+            macho::read_info(&dylib).unwrap().dylib_id.as_deref(),
+            Some("@@HOMEBREW_PREFIX@@/lib/libg.dylib")
+        );
     }
 
     #[test]
