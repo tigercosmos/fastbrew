@@ -614,6 +614,15 @@ pub fn postinstall(ctx: &Ctx, args: &PostinstallArgs) -> Result<()> {
     for name in &args.names {
         let formula = resolve::resolve_installed(&ctx.cfg, index, name)?;
         let keg = latest_keg(ctx, &formula.name)?;
+        // A Ruby `post_install` is the Ruby `brew`'s job; `postinstall` is a
+        // whole command, so it hands the invocation over rather than
+        // shelling out mid-run.
+        if crate::ops::postinstall::needs_ruby_post_install(&formula) {
+            return ctx.delegate(&format!(
+                "`{}`'s post_install needs the Ruby formula DSL",
+                formula.full_name()
+            ));
+        }
         crate::ops::postinstall::run_post_install(&ctx.cfg, &formula, &keg)?;
     }
     Ok(())

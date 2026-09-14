@@ -808,6 +808,125 @@ fn sudo_service_user_needs_a_username_and_root() {
     );
 }
 
+// ------------------------------------------------------- ruby post_install
+
+/// Write a tap formula plus an installed keg for it, so the commands that act
+/// on an installed formula can reach it.
+fn tap_formula_keg(env: &Env, tap: &str, name: &str, body: &str) -> PathBuf {
+    let (user, repo) = tap.split_once('/').expect("user/repo");
+    let dir = env
+        .sandbox
+        .prefix
+        .join("Library/Taps")
+        .join(user)
+        .join(format!("homebrew-{repo}"))
+        .join("Formula");
+    std::fs::create_dir_all(&dir).expect("mkdir Formula");
+    std::fs::write(dir.join(format!("{name}.rb")), body).expect("write formula");
+
+    let keg = env.sandbox.prefix.join("Cellar").join(name).join("1.0");
+    std::fs::create_dir_all(keg.join("bin")).expect("mkdir keg");
+    std::fs::write(
+        keg.join("INSTALL_RECEIPT.json"),
+        serde_json::json!({
+            "installed_on_request": true,
+            "runtime_dependencies": [],
+            "source": {
+                "spec": "stable",
+                "versions": {"stable": "1.0", "version_scheme": 0},
+                "tap": tap,
+            },
+        })
+        .to_string(),
+    )
+    .expect("write receipt");
+    keg
+}
+
+/// A `brew` that records its arguments instead of doing anything.
+fn fake_brew(env: &Env) -> PathBuf {
+    let path = env.sandbox.home.join("fake-brew");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n",
+            env.sandbox.home.join("brew-argv").display()
+        ),
+    )
+    .expect("write the fake brew");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
+}
+
+/// A tap formula's Ruby `post_install` needs the formula DSL. Skipping it
+/// silently would leave the keg unconfigured, so `postinstall` hands the run
+/// to the Ruby `brew` — and says so plainly when it cannot.
+#[test]
+fn a_ruby_post_install_is_delegated_rather_than_skipped() {
+    let env = env_or_skip!();
+    let tag = support::bottle_tag();
+    let tap = "tiger/postinstall";
+    let body = format!(
+        r#"class Postfoo < Formula
+  desc "Tap formula with a Ruby post_install"
+  homepage "https://example.invalid/postfoo"
+  url "https://example.invalid/postfoo-1.0.tar.gz"
+  sha256 "7777777777777777777777777777777777777777777777777777777777777777"
+  license "MIT"
+
+  bottle do
+    root_url "https://bottles.invalid/v2/tiger/postfoo"
+    sha256 cellar: :any_skip_relocation, {tag}: "8888888888888888888888888888888888888888888888888888888888888888"
+  end
+
+  def post_install
+    (var/"postfoo-marker").write("x")
+  end
+end
+"#
+    );
+    tap_formula_keg(&env, tap, "postfoo", &body);
+
+    // Planning still works; nothing about the plan needs Ruby.
+    let plan = env.combined(&["install", "--dry-run", "tiger/postinstall/postfoo"]);
+    assert!(
+        plan.contains("postfoo"),
+        "the formula still resolves and plans:\n{plan}"
+    );
+
+    // Without a `brew` there is nothing to delegate to, and the command says
+    // exactly which step it cannot run.
+    let out = env.run(&["postinstall", "tiger/postinstall/postfoo"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = support::strip_ansi(&String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stderr.contains("post_install needs the Ruby formula DSL"),
+        "the reason names post_install:\n{stderr}"
+    );
+
+    // With one, the invocation is handed over unchanged.
+    let brew = fake_brew(&env);
+    let argv = env.sandbox.home.join("brew-argv");
+    let _ = std::fs::remove_file(&argv);
+    let out = env
+        .cmd()
+        .args(["postinstall", "tiger/postinstall/postfoo"])
+        .env_remove("FASTBREW_NO_DELEGATE")
+        .env("FASTBREW_BREW", &brew)
+        .output()
+        .expect("run fastbrew");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&argv).expect("the fake brew ran"),
+        "postinstall\ntiger/postinstall/postfoo\n"
+    );
+}
+
 // ---------------------------------------------------------- general CLI
 
 /// `brew` with no arguments prints `HOMEBREW_HELP_MESSAGE` on stderr and

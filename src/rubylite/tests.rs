@@ -21,6 +21,36 @@ fn formula(source: &str, name: &str, t: &str) -> TapFormula {
         .unwrap_or_else(|e| panic!("{name} on {t}: {e}"))
 }
 
+/// A Ruby `post_install` only the formula DSL can run has to be visible on
+/// the entry, or the installer would skip it without a word.
+#[test]
+fn records_a_ruby_post_install_method() {
+    let source = r#"class Withpost < Formula
+  desc "Formula with a Ruby post_install"
+  homepage "https://example.invalid/withpost"
+  url "https://example.invalid/withpost-1.0.tar.gz"
+  sha256 "1111111111111111111111111111111111111111111111111111111111111111"
+
+  def install
+    bin.install "withpost"
+  end
+
+  def post_install
+    (var/"marker").write("x")
+  end
+end
+"#;
+    let f = formula(source, "withpost", "arm64_tahoe");
+    assert!(f.has_install_method);
+    assert!(f.entry.post_install_defined);
+    // Nothing declarative is generated for it: the Ruby is the only source.
+    assert!(f.entry.post_install_steps.is_empty());
+
+    // A formula without one keeps the flag clear.
+    let plain = formula(BUN, "bun", "arm64_tahoe");
+    assert!(!plain.entry.post_install_defined);
+}
+
 #[test]
 fn parses_bun_from_the_host_tap() {
     // `bun.rb` branches with `if OS.mac?` / `Hardware::CPU.arm?`, not `on_macos`.

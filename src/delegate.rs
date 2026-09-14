@@ -83,6 +83,41 @@ pub fn find_brew(cfg: &Config) -> Option<PathBuf> {
     None
 }
 
+/// Run the Ruby `brew` as a child process and wait for it.
+///
+/// `exec_brew` replaces this process, which is right for a command fastbrew
+/// does not implement at all; a step *inside* a command (a Ruby
+/// `post_install` during an install) has to come back here afterwards.
+pub fn run_brew(
+    cfg: &Config,
+    args: &[OsString],
+    reason: &str,
+    quiet: bool,
+) -> Result<std::process::ExitStatus> {
+    let brew = brew_for(cfg, reason)?;
+    if !quiet {
+        eprintln!("fastbrew: delegating to brew ({reason})");
+    }
+    Command::new(&brew)
+        .args(args)
+        .status()
+        .map_err(|e| Error::user(format!("Failed to run {}: {e}", brew.display())))
+}
+
+/// The `brew` a delegation may use, or the error explaining why there is none.
+fn brew_for(cfg: &Config, reason: &str) -> Result<PathBuf> {
+    if cfg.no_delegate {
+        return Err(Error::user(format!(
+            "FASTBREW_NO_DELEGATE is set, refusing to delegate to brew ({reason})."
+        )));
+    }
+    find_brew(cfg).ok_or_else(|| {
+        Error::user(format!(
+            "This needs Homebrew's `brew` ({reason}) but none was found.\nInstall Homebrew from https://brew.sh and try again, or set FASTBREW_BREW to its path."
+        ))
+    })
+}
+
 /// Never returns on success (process image is replaced).
 pub fn exec_brew(
     cfg: &Config,
@@ -90,16 +125,7 @@ pub fn exec_brew(
     reason: &str,
     quiet: bool,
 ) -> Result<std::convert::Infallible> {
-    if cfg.no_delegate {
-        return Err(Error::user(format!(
-            "FASTBREW_NO_DELEGATE is set, refusing to delegate to brew ({reason})."
-        )));
-    }
-    let Some(brew) = find_brew(cfg) else {
-        return Err(Error::user(format!(
-            "This needs Homebrew's `brew` ({reason}) but none was found.\nInstall Homebrew from https://brew.sh and try again, or set FASTBREW_BREW to its path."
-        )));
-    };
+    let brew = brew_for(cfg, reason)?;
     if !quiet {
         eprintln!("fastbrew: delegating to brew ({reason})");
     }
