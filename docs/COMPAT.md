@@ -282,7 +282,7 @@ Per cellar kind (from the API `bottle_cellar`):
 
 1. `:any_skip_relocation` (key absent): only `skip_linkage` is set, so the Mach-O step is skipped — the text step still runs. `formula_installer.rb#pour` always calls `replace_placeholders_with_locations(tab.changed_files, skip_linkage:, ...)`, and `replace_text_in_files` runs whatever `skip_linkage` is. Skip-relocation bottles routinely need it: `ack` 3.10.0 is `:any_skip_relocation` with `changed_files: ["bin/ack"]` and a `#!@@HOMEBREW_PERL@@` shebang that must be expanded. The symlink relativization below also still runs.
 2. `:any`: text replacement of placeholders in the files listed in the tab's `changed_files` (all files when the key is *missing* — an empty list means nothing to do, so the two must be told apart: scan text files, which `Keg#text_files` decides with `file`, plus `.la`/`.lai` libtool files, excluding `.brew/<name>.rb` and `Metafiles::EXTENSIONS` but always including a shebang file and `orig-prefix.txt`). Hardlinked files are rewritten once and re-linked. Then Mach-O relocation of `linkage_files` (all Mach-O files when the key is missing): replace placeholders in `LC_ID_DYLIB`, `LC_LOAD_DYLIB`/`LC_LOAD_WEAK_DYLIB`/`LC_REEXPORT_DYLIB`/`LC_LOAD_UPWARD_DYLIB` names and `LC_RPATH` paths; handle fat binaries; keep load command sizes 8-byte aligned; if the new string does not fit in the existing command and the header pad is exhausted, fall back to `install_name_tool`. The header pad ends at the first section's file offset (`MachOFile#low_fileoff`); an edit never changes the file's size, it rebuilds the load-command region in place and NUL-pads the slack. Note that modern `install_name_tool` (Xcode 26) also refuses to grow load commands past the pad ("larger updated load commands do not fit"), so that fallback only helps with layouts the in-place editor rejects; a bottle whose pad is genuinely exhausted cannot be relocated, and Homebrew fails the pour there too (ruby-macho raises `HeaderPadError` out of `change_install_name`). Re-sign every modified file: `codesign --sign - --force --preserve-metadata=entitlements,requirements,flags,runtime <file>` (parallel across files).
-3. Fixed cellar (`/opt/homebrew/Cellar`): steps of 2, then if `$PREFIX` differs from the bottle's built prefix (`built_prefix` when `padded_prefix` is true, otherwise the cellar's parent), rewrite raw prefix strings inside binaries listed in `binary_relocation_files` (NUL-terminated C strings only, valid UTF-8, no control chars, at most 16384 bytes, new prefix padded with NULs or extra `/` to keep the byte length; refuse when the new prefix is longer than the old one) and re-sign. Padded prefix constant on macOS arm64: `"/opt/homebrew/.brew-padded-arm64"` left-justified with `_` to 64 bytes. Record `relocated_build_prefix` and `relocated_files` in the receipt. Otherwise Homebrew refuses to pour: `<name> was built for /opt/homebrew and can only be relocated to a prefix with a maximum length of 13 characters`.
+3. Fixed cellar (`/opt/homebrew/Cellar`): steps of 2, then if `$PREFIX` differs from the bottle's built prefix (`built_prefix` when `padded_prefix` is true, otherwise the cellar's parent), rewrite raw prefix strings inside binaries listed in `binary_relocation_files` (NUL-terminated C strings only, valid UTF-8, no control chars, at most 16384 bytes, new prefix padded with NULs or extra `/` to keep the byte length; refuse when the new prefix is longer than the old one) and re-sign. Padded prefix constant on macOS arm64: `"/opt/homebrew/.brew-padded-arm64"` left-justified with `_` to 64 bytes. Record `relocated_build_prefix` and `relocated_files` in the receipt. Otherwise Homebrew refuses to pour: `<name> was built for /opt/homebrew and can only be relocated to a prefix with a maximum length of 13 characters`. DIFFERENCE: Homebrew 6.1 says this as a warning over three lines (``Building <name> from source as the bottle needs:`` plus the `HOMEBREW_CELLAR`/`HOMEBREW_PREFIX` it wants and ``Your prefix `<p>` is N characters long, but this bottle can only be relocated to a prefix with a maximum length of M characters.``) and then builds from source. fastbrew cannot build, so it states the same facts on one line — `<name> was built for /opt/homebrew and can only be relocated to a prefix with a maximum length of M characters (yours is <prefix>, N characters)` — and delegates to `brew`, or fails with that text under `FASTBREW_NO_DELEGATE`.
 
 Afterwards, absolute symlinks whose target starts with the build prefix or
 its cellar are rewritten to relative links against our prefix, for every
@@ -438,6 +438,23 @@ but is neither linked nor opt-linked nor pinned also counts as outdated.
 Pinned formulae are excluded from `upgrade` but shown by `outdated`.
 
 ## 9. Output formats
+
+KNOWN DIVERGENCE (verified 2026-09-14 against the reference Ruby with
+`scripts/compat-check.sh hello jq ripgrep bfs`): everything the two tools
+put on disk matches byte for byte — the symlink sets under `bin`, `lib`,
+`share`, `opt` and `var/homebrew/linked`, and every `INSTALL_RECEIPT.json`
+once `time`, `homebrew_version`, `source.path`, `built_on`,
+`source_modified_time`, `compiler` and the order of `runtime_dependencies`
+are normalized — and so does the stdout of `list --versions`, `leaves`,
+`deps --tree` and `uses --installed`. Only `info` differs, because the
+reference Ruby has since redesigned it: it prints `Installed (on request)`
+instead of `Installed`, moves the keg line into an `==> Installed Versions`
+section with a `[Linked]` marker and no `Poured from bottle` line, counts
+the dependencies (`Required (1): oniguruma`) and adds a
+`Recursive Runtime (N)` line, hides build dependencies when every installed
+keg was poured from a bottle, and lists `Aliases:`/`Old Names:` after the
+homepage. fastbrew keeps the layout below, which is the one
+`HOMEBREW_COMPAT_VERSION` (6.0.22) produced.
 
 `info <formula>` (not installed):
 
