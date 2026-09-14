@@ -671,6 +671,117 @@ fn installs_real_casks_end_to_end() {
     assert_eq!(env.stdout(&["list", "--cask"]), "");
 }
 
+/// Write the Caskroom records of an install of a *core* cask, so the outdated
+/// check can compare a stale version against the API without a download.
+fn fake_core_install(env: &Env, token: &str, version: &str) {
+    let caskroom = env.caskroom(token);
+    let stamped = caskroom
+        .join(".metadata")
+        .join(version)
+        .join("20250101000000.000")
+        .join("Casks");
+    std::fs::create_dir_all(&stamped).expect("mkdir metadata");
+    std::fs::create_dir_all(caskroom.join(version)).expect("mkdir staged");
+    std::fs::write(stamped.join(format!("{token}.json")), "{}").expect("write caskfile");
+    std::fs::write(
+        caskroom.join(".metadata/config.json"),
+        serde_json::json!({
+            "default": {"appdir": "/Applications"},
+            "env": {"appdir": env.appdir().to_string_lossy()},
+            "explicit": {},
+        })
+        .to_string(),
+    )
+    .expect("write config");
+    std::fs::write(
+        caskroom.join(".metadata/INSTALL_RECEIPT.json"),
+        serde_json::json!({
+            "homebrew_version": fastbrew::HOMEBREW_COMPAT_VERSION,
+            "loaded_from_api": true,
+            "installed_on_request": true,
+            "uninstall_artifacts": [],
+            "source": {"tap": "homebrew/cask", "version": version},
+        })
+        .to_string(),
+    )
+    .expect("write receipt");
+}
+
+/// `brew outdated --cask` in all three shapes, against the API's own
+/// versions: plain, `--verbose` (`Cask#outdated_info`) and `--json`.
+#[test]
+fn outdated_casks_report_the_version_that_moved() {
+    let env = env_or_skip!();
+    let index = support::api_index().expect("the API index");
+    let plain = "font-fira-code";
+    let auto = "rectangle";
+    let Some(current) = index.cask(plain).and_then(|c| c.version) else {
+        eprintln!("the API index has no {plain}; skipping");
+        return;
+    };
+    assert!(
+        !index.cask(plain).expect("in the index").auto_updates,
+        "{plain} has to be the non-auto-updating case"
+    );
+    assert!(
+        index.cask(auto).expect("in the index").auto_updates,
+        "{auto} has to be the auto-updating case"
+    );
+    let auto_current = index.cask(auto).and_then(|c| c.version).expect("versioned");
+
+    fake_core_install(&env, plain, "0.1");
+    fake_core_install(&env, auto, "0.1");
+
+    // Plain: the tokens, one per line.
+    assert_eq!(env.stdout(&["outdated", "--cask"]), format!("{plain}\n"));
+
+    // `--verbose`: `token (installed) != current`.
+    assert_eq!(
+        env.stdout(&["outdated", "--cask", "--verbose"]),
+        format!("{plain} (0.1) != {current}\n")
+    );
+
+    // `--json`: `outdated_info`'s hash under the `casks` key.
+    let doc: serde_json::Value =
+        serde_json::from_str(&env.stdout(&["outdated", "--cask", "--json"])).expect("json");
+    assert_eq!(doc["formulae"], serde_json::json!([]));
+    assert_eq!(
+        doc["casks"],
+        serde_json::json!([{
+            "name": plain,
+            "installed_versions": ["0.1"],
+            "current_version": current,
+            "pinned": false,
+            "pinned_version": null,
+        }])
+    );
+
+    // The auto-updating cask only shows up for a greedy run.
+    let greedy = env.stdout(&["outdated", "--cask", "--greedy"]);
+    assert!(greedy.lines().any(|l| l == auto), "{greedy}");
+    assert!(greedy.lines().any(|l| l == plain), "{greedy}");
+    assert_eq!(
+        env.stdout(&["outdated", "--cask", "--greedy", "--verbose"]),
+        format!("{plain} (0.1) != {current}\n{auto} (0.1) != {auto_current}\n")
+    );
+    assert_eq!(
+        env.stdout(&["outdated", "--cask", "--greedy-auto-updates"]),
+        greedy,
+        "`--greedy-auto-updates` covers exactly this case"
+    );
+
+    // A pin is reported with the version it holds.
+    assert!(env.run(&["pin", "--cask", plain]).status.success());
+    assert_eq!(
+        env.stdout(&["outdated", "--cask", "--verbose"]),
+        format!("{plain} (0.1) != {current} [pinned at 0.1]\n")
+    );
+    let doc: serde_json::Value =
+        serde_json::from_str(&env.stdout(&["outdated", "--cask", "--json"])).expect("json");
+    assert_eq!(doc["casks"][0]["pinned"], serde_json::json!(true));
+    assert_eq!(doc["casks"][0]["pinned_version"], serde_json::json!("0.1"));
+}
+
 // ------------------------------------------------------- cask edge cases
 
 /// `--appdir` on the command line beats `HOMEBREW_CASK_OPTS`, and the layers
