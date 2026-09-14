@@ -62,6 +62,10 @@ pub struct FormulaEntry {
     pub no_autobump_args: Option<Value>,
     pub link_overwrite_paths: Vec<String>,
     pub pour_bottle_args: Option<Value>,
+    /// Registry root for the bottle (`bottle do root_url`), set for third-party
+    /// tap formulae; `None` means `HOMEBREW_BOTTLE_DOMAIN`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottle_root_url: Option<String>,
 }
 
 /// How a dependency is tagged in `depends_on`.
