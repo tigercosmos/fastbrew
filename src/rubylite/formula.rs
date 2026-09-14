@@ -116,7 +116,13 @@ pub fn parse_formula(source: &str, name: &str, tap: &str, tag: &BottleTag) -> Pa
         .entry
         .stable_version
         .clone()
-        .or_else(|| first.entry.stable_url().and_then(detect_version_from_url))
+        .or_else(|| {
+            first
+                .entry
+                .stable_url()
+                .and_then(crate::version::Version::detect_from_url)
+                .map(|v| v.to_string())
+        })
         .or_else(|| {
             first
                 .entry
@@ -676,80 +682,4 @@ fn conflicts_json(args: &Args) -> Vec<Json> {
 /// Keyword arguments as a `{":key": value}` object (`deprecate!`, `disable!`).
 fn kwargs_json(args: &Args) -> Json {
     RValue::Hash(args.kwargs.clone()).to_json()
-}
-
-/// Fallback for `Version.detect`: pull a version out of a download URL.
-///
-/// `crate::version::Version::detect_from_url` is the full port; this covers the
-/// shapes third-party taps actually use.
-pub fn detect_version_from_url(url: &str) -> Option<String> {
-    const EXTENSIONS: [&str; 15] = [
-        ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz", ".tgz", ".tbz2", ".txz", ".zip",
-        ".tar", ".7z", ".jar", ".crate", ".gz", ".bz2",
-    ];
-    let url = url.split(['?', '#']).next().unwrap_or(url);
-    let path = url.trim_end_matches('/');
-
-    // GitHub release and archive URLs carry the tag in the path.
-    for marker in ["/releases/download/", "/archive/refs/tags/", "/archive/"] {
-        if let Some(rest) = path.split(marker).nth(1) {
-            let tag = rest.split('/').next().unwrap_or(rest);
-            let tag = strip_extensions(tag, &EXTENSIONS);
-            if let Some(v) = version_from_tag(tag) {
-                return Some(v);
-            }
-        }
-    }
-
-    let base = path.rsplit('/').next()?;
-    let base = strip_extensions(base, &EXTENSIONS);
-    // `<name>-<version>` (the version starts with a digit).
-    if let Some(idx) = base.rfind('-') {
-        let candidate = &base[idx + 1..];
-        if candidate.starts_with(|c: char| c.is_ascii_digit()) && looks_like_version(candidate) {
-            return Some(candidate.to_string());
-        }
-    }
-    version_from_tag(base)
-}
-
-fn strip_extensions<'a>(s: &'a str, extensions: &[&str]) -> &'a str {
-    for ext in extensions {
-        if let Some(stripped) = s.strip_suffix(ext) {
-            return stripped;
-        }
-    }
-    s
-}
-
-/// `v1.2.3`, `bun-v1.4.2`, `release-2.0`, `Python-3.14.2` -> the numeric part.
-///
-/// Segments are the `-`/`/` separated words; a dotted one wins over a bare
-/// number so `hoard-2.7.0-darwin-arm64` does not resolve to `64`.
-fn version_from_tag(tag: &str) -> Option<String> {
-    let mut fallback: Option<String> = None;
-    for segment in tag.split(['-', '/']) {
-        let candidate = match segment.strip_prefix(['v', 'V']) {
-            Some(rest) if rest.starts_with(|c: char| c.is_ascii_digit()) => rest,
-            _ => segment,
-        };
-        let candidate = candidate.trim_end_matches('.');
-        if !looks_like_version(candidate) {
-            continue;
-        }
-        if candidate.contains('.') {
-            return Some(candidate.to_string());
-        }
-        if fallback.is_none() {
-            fallback = Some(candidate.to_string());
-        }
-    }
-    fallback
-}
-
-fn looks_like_version(s: &str) -> bool {
-    !s.is_empty()
-        && s.starts_with(|c: char| c.is_ascii_digit())
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' || c == '+')
 }

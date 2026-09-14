@@ -29,7 +29,6 @@ use crate::error::{Error, Result};
 use crate::model::{CaskEntry, FormulaEntry};
 use crate::platform::BottleTag;
 
-pub use formula::detect_version_from_url;
 pub use host::HostCtx;
 
 #[derive(Debug, Clone)]

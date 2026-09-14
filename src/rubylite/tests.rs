@@ -258,6 +258,8 @@ fn parses_formula_without_explicit_version() {
     assert!(caveats.contains("peekaboo config init"));
 }
 
+/// `rubylite` has no URL heuristics of its own: it detects a missing version
+/// with `version::Version::detect_from_url`, the port of `Version.parse`.
 #[test]
 fn detects_versions_from_urls() {
     let cases = [
@@ -278,7 +280,8 @@ fn detects_versions_from_urls() {
         ("https://example.com/jq-1.8.2.zip", "1.8.2"),
     ];
     for (url, want) in cases {
-        assert_eq!(detect_version_from_url(url).as_deref(), Some(want), "{url}");
+        let got = crate::version::Version::detect_from_url(url).map(|v| v.to_string());
+        assert_eq!(got.as_deref(), Some(want), "{url}");
     }
 }
 
