@@ -16,7 +16,8 @@ CARGO  ?= cargo
 BIN     = target/release/fastbrew
 CANDIDATES = $(HOME)/.cargo/bin $(HOME)/.local/bin /opt/homebrew/bin /usr/local/bin
 
-BINDIR ?= $(shell for d in $(CANDIDATES); do case ":$$PATH:" in *":$$d:"*) if [ -d "$$d" ] && [ -w "$$d" ]; then echo "$$d"; break; fi ;; esac; done)
+# Braces, not parentheses: the `)` of the case pattern would end $(shell ...).
+BINDIR ?= ${shell for d in $(CANDIDATES); do case ":$$PATH:" in *":$$d:"*) if [ -d "$$d" ] && [ -w "$$d" ]; then echo "$$d"; break; fi ;; esac; done}
 
 .PHONY: build install uninstall test check bench clean
 
