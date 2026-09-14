@@ -1,23 +1,32 @@
 //! Name resolution for formulae and casks.
 //!
 //! Order for a formula reference `ref` (port of `Formulary.loader_for` for the
-//! API and tap cases). First, `user/repo/name` selects a third-party tap
-//! formula (via `tap` + `rubylite`); `homebrew/core/name` and
-//! `Homebrew/homebrew-core/name` mean core. Second, an exact core name.
-//! Third, a core alias (`formula_aliases`), then a rename (`formula_renames`),
-//! then a tap migration (resolve to the tap's formula if the tap is installed,
-//! else error naming the tap). Fourth, an installed keg by name (for formulae
-//! removed from the API): build a `FormulaEntry` from the receipt with only
-//! the fields the receipt knows. Casks: token, then `cask_renames`, then tap
-//! migration, then installed Caskroom entry.
+//! API, tap and keg cases). First, `user/repo/name` selects that tap's
+//! formula (`FromTapLoader`); `homebrew/core/name` and
+//! `Homebrew/homebrew-core/name` mean core. Second, `FromAPILoader`: an exact
+//! core name, a core alias (`formula_aliases`), a rename
+//! (`formula_renames`) or an oldname. Third, `FromNameLoader`: a bare name
+//! that exists only in installed third-party taps — the migration target tap
+//! first, then every other installed tap; more than one match is
+//! `TapFormulaAmbiguityError`. Fourth, a tap migration whose tap is not
+//! installed, reported with Homebrew's `brew tap` hint. Fifth,
+//! `FromKegLoader`: an installed keg by name (for formulae removed from the
+//! API), with a `FormulaEntry` built from the receipt.
+//!
+//! Casks follow the same shape: `user/repo/token`, then the API token and
+//! `cask_renames`, then installed taps, then a tap migration, then an
+//! installed Caskroom entry.
 //!
 //! Errors are `Error::Unavailable` with the suggestions Homebrew's
 //! `DidYouMean::SpellChecker` would produce.
 
 use crate::api::index::Index;
+use crate::api::taps::TapIndex;
 use crate::config::Config;
 use crate::error::{Error, PackageKind, Result};
 use crate::model::{CaskEntry, FormulaEntry};
+use crate::platform::Host;
+use crate::tap::Tap;
 use crate::version::PkgVersion;
 
 /// What a user-supplied name resolved to.
@@ -50,6 +59,7 @@ pub fn resolve(cfg: &Config, index: &Index, name: &str, kind: Kind) -> Result<Re
         Kind::Cask => resolve_cask(cfg, index, name).map(Resolved::Cask),
         Kind::Any => {
             if let Ok(f) = resolve_formula(cfg, index, name) {
+                warn_if_cask_conflicts(cfg, index, name);
                 return Ok(Resolved::Formula(f));
             }
             match resolve_cask(cfg, index, name) {
@@ -60,6 +70,25 @@ pub fn resolve(cfg: &Config, index: &Index, name: &str, kind: Kind) -> Result<Re
             }
         }
     }
+}
+
+/// `NamedArgs#warn_if_cask_conflicts`: a name that is both a formula and a
+/// cask resolves to the formula, with a warning naming the cask.
+fn warn_if_cask_conflicts(cfg: &Config, index: &Index, reference: &str) {
+    if reference.contains('/') || crate::output::is_quiet() {
+        return;
+    }
+    let Ok(cask) = resolve_cask(cfg, index, reference) else {
+        return;
+    };
+    // `package_conflicts_message`: the fully-qualified token is only offered
+    // when the cask has a tap, which every API and tap cask does.
+    crate::output::opoo(&format!(
+        "Treating {reference} as a formula. For the cask, use {}/{} or specify the `--cask` flag. \
+         To silence this message, use the `--formula` flag.",
+        cask.tap(),
+        cask.token
+    ));
 }
 
 /// Split `user/repo/name` into its tap and the bare name.
@@ -76,14 +105,38 @@ fn split_tap_ref(reference: &str) -> Option<(String, String)> {
     Some((format!("{user}/{repo}"), parts[2].to_string()))
 }
 
+/// Load the metadata of every installed third-party tap.
+///
+/// Only the paths that miss in the API call this, so the common lookup never
+/// touches a tap.
+fn tap_index(cfg: &Config) -> TapIndex {
+    TapIndex::load(cfg, &Host::detect().bottle_tag())
+}
+
+/// `TapFormulaUnavailableError#to_s` for a tap that is not installed.
+fn needs_tap(reference: &str, tap: &str) -> Error {
+    Error::user(format!(
+        "No available formula or cask with the name \"{reference}\".\nThis command requires the tap {tap}.\nIf you trust this tap, tap it explicitly and then try again:\n  brew tap {tap}"
+    ))
+}
+
+/// `TapFormulaAmbiguityError`: a bare name carried by several installed taps.
+fn ambiguous(name: &str, taps: &[String]) -> Error {
+    let list: String = taps
+        .iter()
+        .map(|t| format!("\n       * {t}/{name}"))
+        .collect();
+    Error::user(format!(
+        "Formulae found in multiple taps:{list}\n\nPlease use the fully-qualified name (e.g. {}/{name}) to refer to a specific formula.",
+        taps.first().map(String::as_str).unwrap_or_default()
+    ))
+}
+
 pub fn resolve_formula(cfg: &Config, index: &Index, reference: &str) -> Result<FormulaEntry> {
     let mut name = reference.to_string();
     if let Some((tap, bare)) = split_tap_ref(reference) {
         if tap != "homebrew/core" {
-            // Third-party taps need `tap` + `rubylite` (phase 2).
-            return Err(Error::user(format!(
-                "No available formula or cask with the name \"{reference}\".\nThis command requires the tap {tap}.\nIf you trust this tap, tap it explicitly and then try again:\n  brew tap {tap}"
-            )));
+            return tap_formula(cfg, reference, &tap, &bare);
         }
         name = bare;
     }
@@ -106,12 +159,41 @@ pub fn resolve_formula(cfg: &Config, index: &Index, reference: &str) -> Result<F
     {
         return Ok(entry);
     }
-    if let Some(tap) = index.formula_tap_migration(&name) {
-        // `homebrew/cask/google-cloud-sdk` style targets name the new token.
-        let (tap_name, new_name) = match tap.split('/').collect::<Vec<_>>()[..] {
-            [user, repo, rest] => (format!("{user}/{repo}"), rest.to_string()),
-            _ => (tap.clone(), name.clone()),
-        };
+
+    // `homebrew/cask/google-cloud-sdk` style targets name the new token.
+    let migration =
+        index.formula_tap_migration(&name).map(
+            |tap| match tap.split('/').collect::<Vec<_>>()[..] {
+                [user, repo, rest] => (format!("{user}/{repo}"), rest.to_string()),
+                _ => (tap.clone(), name.clone()),
+            },
+        );
+
+    // `FromNameLoader`: the migration target first, then every installed tap.
+    let taps = tap_index(cfg);
+    if let Some((tap_name, new_name)) = &migration
+        && let Some(meta) = taps.get(tap_name)
+        && let Some(found) = meta.formula(new_name)
+    {
+        return found.map(|f| f.entry).map_err(needs_delegation);
+    }
+    let hits = taps.taps_with_formula(&name);
+    match hits.len() {
+        0 => {}
+        1 => {
+            return hits[0]
+                .formula(&name)
+                .expect("tap reported the name")
+                .map(|f| f.entry)
+                .map_err(needs_delegation);
+        }
+        _ => {
+            let names: Vec<String> = hits.iter().map(|m| m.tap.name()).collect();
+            return Err(ambiguous(&name, &names));
+        }
+    }
+
+    if let Some((tap_name, new_name)) = migration {
         if tap_name == "homebrew/cask"
             && let Some(cask) = index.cask(&new_name)
         {
@@ -135,13 +217,37 @@ pub fn resolve_formula(cfg: &Config, index: &Index, reference: &str) -> Result<F
     })
 }
 
+/// A formula `rubylite` could not extract has to go to the Ruby `brew`.
+fn needs_delegation(reason: String) -> Error {
+    Error::NeedsDelegation {
+        reason: format!("fastbrew cannot read this tap formula ({reason})"),
+    }
+}
+
+/// `FromTapLoader`: `user/repo/name` with the tap installed.
+fn tap_formula(cfg: &Config, reference: &str, tap_name: &str, name: &str) -> Result<FormulaEntry> {
+    let Some(tap) = Tap::parse(tap_name) else {
+        return Err(Error::user(format!("Invalid tap name: '{tap_name}'")));
+    };
+    if !tap.is_installed(cfg) {
+        return Err(needs_tap(reference, &tap.name()));
+    }
+    let meta = crate::api::taps::load_tap(cfg, &tap, &Host::detect().bottle_tag());
+    match meta.formula(name) {
+        Some(found) => found.map(|f| f.entry).map_err(needs_delegation),
+        None => Err(Error::Unavailable {
+            name: reference.to_string(),
+            kind: PackageKind::Formula,
+            suggestions: spell_check(name, &meta.formula_names()),
+        }),
+    }
+}
+
 pub fn resolve_cask(cfg: &Config, index: &Index, reference: &str) -> Result<CaskEntry> {
     let mut token = reference.to_string();
     if let Some((tap, bare)) = split_tap_ref(reference) {
         if tap != "homebrew/cask" {
-            return Err(Error::user(format!(
-                "No available formula or cask with the name \"{reference}\".\nThis command requires the tap {tap}.\nIf you trust this tap, tap it explicitly and then try again:\n  brew tap {tap}"
-            )));
+            return tap_cask(cfg, reference, &tap, &bare);
         }
         token = bare;
     }
@@ -154,6 +260,16 @@ pub fn resolve_cask(cfg: &Config, index: &Index, reference: &str) -> Result<Cask
     {
         return Ok(entry);
     }
+
+    let taps = tap_index(cfg);
+    let hits = taps.taps_with_cask(&token);
+    if let Some(meta) = hits.first() {
+        return meta
+            .cask(&token)
+            .expect("tap reported the token")
+            .map_err(needs_delegation_cask);
+    }
+
     if let Some(tap) = index.cask_tap_migration(&token) {
         return Err(Error::user(format!(
             "Cask {token} was migrated to the {tap} tap."
@@ -167,6 +283,29 @@ pub fn resolve_cask(cfg: &Config, index: &Index, reference: &str) -> Result<Cask
     Err(Error::user(format!(
         "Cask '{reference}' is unavailable: No Cask with this name exists."
     )))
+}
+
+fn needs_delegation_cask(reason: String) -> Error {
+    Error::NeedsDelegation {
+        reason: format!("fastbrew cannot read this tap cask ({reason})"),
+    }
+}
+
+/// `Cask::CaskLoader::FromTapPathLoader`: `user/repo/token`.
+fn tap_cask(cfg: &Config, reference: &str, tap_name: &str, token: &str) -> Result<CaskEntry> {
+    let Some(tap) = Tap::parse(tap_name) else {
+        return Err(Error::user(format!("Invalid tap name: '{tap_name}'")));
+    };
+    if !tap.is_installed(cfg) {
+        return Err(needs_tap(reference, &tap.name()));
+    }
+    let meta = crate::api::taps::load_tap(cfg, &tap, &Host::detect().bottle_tag());
+    match meta.cask(token) {
+        Some(found) => found.map_err(needs_delegation_cask),
+        None => Err(Error::user(format!(
+            "Cask '{reference}' is unavailable: No Cask with this name exists."
+        ))),
+    }
 }
 
 /// Build a minimal entry for a formula that is installed but no longer in the

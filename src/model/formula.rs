@@ -66,6 +66,11 @@ pub struct FormulaEntry {
     /// tap formulae; `None` means `HOMEBREW_BOTTLE_DOMAIN`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bottle_root_url: Option<String>,
+    /// Path of the formula file inside its tap (`Formula/f/foo.rb`), set for
+    /// third-party tap formulae. Core formulae compute it from the name with
+    /// [`FormulaEntry::core_ruby_path`]; the payload does not carry it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ruby_source_path: Option<String>,
 }
 
 /// How a dependency is tagged in `depends_on`.
@@ -264,6 +269,15 @@ impl FormulaEntry {
     /// Human-readable license (SPDX expression), approximating `SPDX.license_expression_to_string`.
     pub fn license_string(&self) -> Option<String> {
         self.license.as_ref().map(license_to_string)
+    }
+
+    /// Path of the formula file inside its tap: the parsed path for tap
+    /// formulae, the sharded homebrew-core path otherwise.
+    pub fn ruby_path(&self) -> String {
+        match &self.ruby_source_path {
+            Some(p) => p.clone(),
+            None => self.core_ruby_path(),
+        }
     }
 
     /// Path of the formula file inside homebrew-core (`Formula/h/hello.rb`, `Formula/lib/libfoo.rb`).

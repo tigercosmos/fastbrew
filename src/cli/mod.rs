@@ -126,6 +126,7 @@ fn dispatch(argv: Vec<OsString>) -> Result<i32> {
 
     let global = GlobalFlags::scan(&normalized);
     let normalized = GlobalFlags::strip(normalized);
+    output::set_quiet(global.quiet);
     let ctx = Ctx {
         verbose: global.verbose || cfg.verbose,
         quiet: global.quiet,

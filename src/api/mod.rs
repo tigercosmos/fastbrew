@@ -10,12 +10,15 @@
 //!   tag, rebuilding it from the cached JWS file when missing or stale.
 //! - [`index::Index`] lookups: `formula(name)`, `cask(token)`, alias/rename
 //!   maps, `all_formulae()`, `all_casks()`, `search_names`, `search_desc`.
+//! - [`taps::TapIndex::load`]: the same metadata for third-party taps, parsed
+//!   from their `.rb` files by `rubylite` and cached per file.
 //!
 //! See `docs/DESIGN.md` 4.1 and `docs/COMPAT.md` 1.
 
 pub mod fetch;
 pub mod index;
 pub mod jws;
+pub mod taps;
 
 pub const INTERNAL_PACKAGES_ENDPOINT_PREFIX: &str = "internal/packages.";
 pub const JWS_KEY_ID: &str = "homebrew-1";

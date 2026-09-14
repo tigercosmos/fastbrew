@@ -26,6 +26,23 @@ pub fn stdout_is_tty() -> bool {
     std::io::stdout().is_terminal()
 }
 
+pub fn stderr_is_tty() -> bool {
+    std::io::stderr().is_terminal()
+}
+
+/// Homebrew's `Context.current.quiet?`: a process-wide flag set from `-q`,
+/// read by code too deep to be handed the CLI options (name resolution warns
+/// about formula/cask conflicts unless quiet).
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_quiet(quiet: bool) {
+    QUIET.store(quiet, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_quiet() -> bool {
+    QUIET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
 const UNDERLINE: &str = "\x1b[4m";
