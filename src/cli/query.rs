@@ -483,9 +483,24 @@ fn info_json(ctx: &Ctx, args: &InfoArgs, version: &str) -> Result<()> {
     for name in &names {
         match resolve::resolve(&ctx.cfg, index, name, kind)? {
             resolve::Resolved::Formula(f) => {
+                // The v2 document comes from `formula/<name>.json`, which only
+                // exists for the core tap; a tap formula's hash is built by
+                // the Ruby from the loaded `Formula` object.
+                if !f.tap.is_empty() && f.tap != "homebrew/core" {
+                    return ctx.delegate(&format!(
+                        "`info --json` for the tap formula {} needs the Ruby formula DSL",
+                        f.full_name()
+                    ));
+                }
                 formulae.push(formula_json(ctx, &f)?);
             }
             resolve::Resolved::Cask(c) => {
+                if c.tap() != "homebrew/cask" {
+                    return ctx.delegate(&format!(
+                        "`info --json` for the tap cask {} needs the Ruby cask DSL",
+                        c.full_token()
+                    ));
+                }
                 casks.push(cask_json(ctx, &c)?);
             }
         }

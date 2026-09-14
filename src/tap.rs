@@ -124,13 +124,16 @@ impl Tap {
     }
 
     /// Configured `origin` URL, falling back to the default remote.
+    ///
+    /// Read straight out of `.git/config` rather than through `git config`:
+    /// `info` prints this for every tap formula, and a process spawn there
+    /// costs more than the whole command (`CLAUDE.md` rule 5).
     pub fn remote(&self, cfg: &Config) -> Option<String> {
         if !self.is_installed(cfg) {
             return Some(self.default_remote());
         }
-        let out = git(&self.path(cfg), &["config", "--get", "remote.origin.url"]).ok()?;
-        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if url.is_empty() { None } else { Some(url) }
+        let text = std::fs::read_to_string(self.path(cfg).join(".git/config")).ok()?;
+        origin_url(&text)
     }
 
     /// `<tap>/<name>` used in messages and receipts.
@@ -166,6 +169,39 @@ impl std::fmt::Display for Tap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.name())
     }
+}
+
+/// `url` of the `[remote "origin"]` section of a git config file.
+///
+/// A tap's `.git/config` is written by `git clone`, so only the plain INI
+/// shape matters: section headers in brackets, `key = value` under them, `#`
+/// and `;` comments.
+fn origin_url(config: &str) -> Option<String> {
+    let mut in_origin = false;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(section) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            let section = section.replace('"', "");
+            let normalized: String = section.split_whitespace().collect::<Vec<_>>().join(".");
+            in_origin = normalized.eq_ignore_ascii_case("remote.origin");
+            continue;
+        }
+        if !in_origin {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("url")
+        {
+            let url = value.trim();
+            if !url.is_empty() {
+                return Some(url.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn looks_like_url(s: &str) -> bool {
@@ -728,6 +764,35 @@ mod tests {
         assert_eq!(
             t.cask_dir(&cfg),
             PathBuf::from("/sb/Library/Taps/user/homebrew-repo/Casks")
+        );
+    }
+
+    #[test]
+    fn reads_the_origin_url_from_a_git_config() {
+        let config = r#"[core]
+	repositoryformatversion = 0
+	bare = false
+[remote "origin"]
+	url = https://github.com/user/homebrew-repo
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "main"]
+	remote = origin
+"#;
+        assert_eq!(
+            origin_url(config).as_deref(),
+            Some("https://github.com/user/homebrew-repo")
+        );
+        // A tap with no origin, and one whose only remote is named otherwise.
+        assert_eq!(origin_url("[core]\n\tbare = false\n"), None);
+        assert_eq!(
+            origin_url("[remote \"upstream\"]\n\turl = https://example.com/x\n"),
+            None
+        );
+        // Comments and an `ssh://` remote.
+        assert_eq!(
+            origin_url("; a comment\n[remote \"origin\"]\n\turl = git@github.com:user/repo.git\n")
+                .as_deref(),
+            Some("git@github.com:user/repo.git")
         );
     }
 
