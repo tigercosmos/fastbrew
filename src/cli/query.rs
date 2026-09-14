@@ -588,6 +588,14 @@ fn cask_json(ctx: &Ctx, cask: &CaskEntry) -> Result<Value> {
         "installed".into(),
         installed.clone().map(Value::String).unwrap_or(Value::Null),
     );
+    // `Cask#install_time`, from the latest `.metadata/<version>/<timestamp>`.
+    map.insert(
+        "installed_time".into(),
+        crate::cask::installed_cask(&ctx.cfg, &cask.token)
+            .and_then(|c| c.install_time())
+            .map(|t| Value::Number(t.into()))
+            .unwrap_or(Value::Null),
+    );
     let pinned = ctx.cfg.pinned_casks().join(&cask.token).is_symlink();
     map.insert("pinned".into(), Value::Bool(pinned));
     let index = ctx.index()?;

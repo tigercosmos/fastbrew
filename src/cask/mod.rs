@@ -82,6 +82,22 @@ impl InstalledCask {
             .join("LATEST_DOWNLOAD_SHA256")
     }
 
+    /// `Cask#install_time`: the timestamp directory of the latest install.
+    ///
+    /// Homebrew writes the directory name in UTC (`Metadata.new_timestamp`)
+    /// but reads it back with `Time.strptime`, which resolves it in the local
+    /// zone; `info --json` therefore reports a time shifted by the local UTC
+    /// offset. fastbrew reproduces the value Homebrew prints.
+    pub fn install_time(&self) -> Option<i64> {
+        use chrono::{NaiveDateTime, TimeZone};
+        let stamp = self.metadata_path.as_ref()?.file_name()?.to_str()?;
+        let naive = NaiveDateTime::parse_from_str(stamp, "%Y%m%d%H%M%S%.f").ok()?;
+        chrono::Local
+            .from_local_datetime(&naive)
+            .single()
+            .map(|t| t.timestamp())
+    }
+
     /// `.metadata/<version>/<timestamp>/Casks/<token>.{json,internal.json,rb}`.
     pub fn caskfile_path(&self) -> Option<PathBuf> {
         let dir = self.metadata_path.as_ref()?.join("Casks");

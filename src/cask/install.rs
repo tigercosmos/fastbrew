@@ -106,11 +106,17 @@ pub fn upgrade_casks(
             }
             return Err(Error::user(format!("Cask '{token}' is not installed.")));
         };
-        if !is_outdated(&cask, &installed, greedy) {
-            if !opts.quiet {
+        // `Cask::Upgrade.outdated_casks`: a cask named on the command line is
+        // checked greedily, the sweep over every installed cask is not.
+        let named = !tokens.is_empty();
+        if !is_outdated(cfg, &cask, &installed, greedy || named) {
+            // The sweep says nothing about the casks it leaves alone; only
+            // the named form reports why it is skipping one.
+            if named && !opts.quiet {
                 output::opoo(&format!(
-                    "Not upgrading {}, the latest version is already installed",
-                    cask.token
+                    "Not upgrading {}, {}",
+                    cask.token,
+                    not_upgrading_reason(&cask)
                 ));
             }
             continue;
@@ -200,11 +206,14 @@ pub fn install_cask_entry(
             output::opoo(&format!("Cask '{}' is already installed.", cask.token));
             return Ok(());
         }
-        if !is_outdated(cask, installed, false) {
+        // `cmd/install.rb` hands its named casks to
+        // `Cask::Upgrade.outdated_casks`, which checks each of them greedily.
+        if !is_outdated(cfg, cask, installed, true) {
             if !opts.quiet {
                 output::opoo(&format!(
-                    "Not upgrading {}, the latest version is already installed",
-                    cask.token
+                    "Not upgrading {}, {}",
+                    cask.token,
+                    not_upgrading_reason(cask)
                 ));
             }
             return Ok(());
@@ -905,11 +914,51 @@ pub fn api_file_path(cfg: &Config) -> String {
 }
 
 /// `Cask#outdated_version`, restricted to what the internal API can answer.
-pub fn is_outdated(cask: &CaskEntry, installed: &InstalledCask, greedy: bool) -> bool {
+///
+/// `greedy` is `--greedy`; `Cask::Upgrade.outdated_casks` also passes it for
+/// every cask named on the command line, so only the sweep over all installed
+/// casks runs non-greedily.
+pub fn is_outdated(
+    cfg: &Config,
+    cask: &CaskEntry,
+    installed: &InstalledCask,
+    greedy: bool,
+) -> bool {
     match cask.version.as_deref() {
         None => false,
-        Some("latest") => greedy,
-        Some(version) => version != installed.version,
+        // A `version :latest` cask carries no version to compare, so Homebrew
+        // fetches the container again and compares its checksum.
+        Some("latest") => greedy && outdated_download_sha(cfg, cask, installed),
+        Some(version) if version == installed.version => false,
+        // An `auto_updates` cask updates itself; Homebrew leaves it alone
+        // unless the check is greedy.
+        Some(_) => greedy || !cask.auto_updates,
+    }
+}
+
+/// `Cask#outdated_download_sha?`: fetch the container and compare its sha256
+/// with `LATEST_DOWNLOAD_SHA256`, recorded when the cask was installed. A
+/// missing record, or a download that cannot be checksummed, counts as
+/// outdated exactly as `checksumable?` returning false does.
+fn outdated_download_sha(cfg: &Config, cask: &CaskEntry, installed: &InstalledCask) -> bool {
+    let recorded = std::fs::read_to_string(installed.download_sha_path())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if recorded.is_empty() {
+        return true;
+    }
+    super::download::download_cask(cfg, cask, true)
+        .and_then(|path| super::download::file_sha256(&path))
+        .map(|current| current != recorded)
+        .unwrap_or(true)
+}
+
+/// `Cask::Upgrade.outdated_casks`' wording for a named cask it is skipping.
+fn not_upgrading_reason(cask: &CaskEntry) -> &'static str {
+    if cask.is_latest() {
+        "the downloaded artifact has not changed"
+    } else {
+        "the latest version is already installed"
     }
 }
 
@@ -1029,33 +1078,53 @@ mod tests {
 
     #[test]
     fn outdated_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::cask::tests_support::config(tmp.path());
         let installed = InstalledCask {
             token: "demo".into(),
             version: "1.0".into(),
-            caskroom_path: PathBuf::from("/tmp/demo"),
+            caskroom_path: tmp.path().join("Caskroom/demo"),
             metadata_path: None,
         };
         assert!(is_outdated(
+            &cfg,
             &cask(serde_json::json!({"version": "1.1"})),
             &installed,
             false
         ));
         assert!(!is_outdated(
+            &cfg,
             &cask(serde_json::json!({"version": "1.0"})),
             &installed,
             false
         ));
-        // `version :latest` only counts as outdated when greedy.
-        assert!(!is_outdated(
-            &cask(serde_json::json!({"version": "latest"})),
-            &installed,
-            false
-        ));
-        assert!(is_outdated(
-            &cask(serde_json::json!({"version": "latest"})),
-            &installed,
-            true
-        ));
+        // An `auto_updates` cask keeps itself current, so it is outdated only
+        // when the check is greedy.
+        let auto = cask(serde_json::json!({"version": "1.1", "auto_updates": true}));
+        assert!(!is_outdated(&cfg, &auto, &installed, false));
+        assert!(is_outdated(&cfg, &auto, &installed, true));
+
+        // `version :latest` never counts without `--greedy`; with it, a
+        // missing `LATEST_DOWNLOAD_SHA256` means the download has to be
+        // checked, which the entry's unreachable url settles as "changed".
+        let latest = cask(serde_json::json!({
+            "version": "latest",
+            "url_args": ["http://127.0.0.1:9/demo.zip"],
+        }));
+        assert!(!is_outdated(&cfg, &latest, &installed, false));
+        assert!(is_outdated(&cfg, &latest, &installed, true));
+    }
+
+    #[test]
+    fn not_upgrading_wording() {
+        assert_eq!(
+            not_upgrading_reason(&cask(serde_json::json!({"version": "1.0"}))),
+            "the latest version is already installed"
+        );
+        assert_eq!(
+            not_upgrading_reason(&cask(serde_json::json!({"version": "latest"}))),
+            "the downloaded artifact has not changed"
+        );
     }
 
     #[test]
