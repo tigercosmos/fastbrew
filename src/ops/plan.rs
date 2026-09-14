@@ -43,6 +43,9 @@ pub struct Item {
     pub action: Action,
     /// False for dependencies pulled in implicitly.
     pub requested: bool,
+    /// Full name of the requested formula this one is a dependency of, empty
+    /// for a formula the user named. Homebrew's dependency headings name it.
+    pub root: String,
     pub installed_on_request: bool,
     /// Kegs of this formula that the new one replaces.
     pub existing: Vec<Keg>,

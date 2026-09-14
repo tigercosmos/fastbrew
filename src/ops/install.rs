@@ -137,7 +137,7 @@ pub fn install_formulae_with(
 
     // 8-14. Finish each keg in dependency order.
     let mut failed: HashSet<String> = HashSet::new();
-    let mut printed_deps_header = false;
+    let mut headed: HashSet<String> = HashSet::new();
     let mut messages: Vec<(String, caveats::Caveats)> = Vec::new();
     let mut link_failed = false;
 
@@ -156,23 +156,15 @@ pub fn install_formulae_with(
             continue;
         }
 
-        if !item.requested && !printed_deps_header {
-            printed_deps_header = true;
-            if let Some(root) = plan.roots.first() {
-                let dep_names: Vec<String> = plan
-                    .items
-                    .iter()
-                    .filter(|i| !i.requested)
-                    .map(|i| i.name().to_string())
-                    .collect();
-                output::ohai(&format!(
-                    "Installing dependencies for {}: {}",
-                    root,
-                    resolve::to_sentence(&dep_names, "and")
-                ));
-            }
+        if !item.requested && !opts.quiet && headed.insert(item.root.clone()) {
+            let dep_names = plan.dependencies_of(&item.root);
+            output::ohai(&format!(
+                "Installing dependencies for {}: {}",
+                item.root,
+                resolve::to_sentence(&dep_names, "and")
+            ));
         }
-        print_install_header(&plan, item, opts, mode);
+        print_install_header(item, opts, mode);
         if !opts.quiet {
             // `ohai "Pouring #{downloadable.downloader.basename}"`: the
             // bottle's own name, not the hashed cache file name.
@@ -282,6 +274,15 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// Names of the dependencies this run installs for `root`, in install order.
+    fn dependencies_of(&self, root: &str) -> Vec<String> {
+        self.items
+            .iter()
+            .filter(|i| !i.requested && i.root == root)
+            .map(|i| i.name().to_string())
+            .collect()
+    }
+
     /// pkg_version this run installs for `name`, if any.
     fn planned_version(&self, name: &str) -> Option<String> {
         self.items
@@ -332,12 +333,13 @@ fn build_plan(
             cfg,
             root,
             action,
-            true,
+            None,
             opts.on_request || opts.reinstall,
         )?);
     }
 
-    // Dependencies go first, in install order.
+    // Dependencies go first, in install order, each attributed to the first
+    // requested formula that needs it.
     let closure = plan::dependency_closure(cfg, index, &wanted, opts.ignore_dependencies);
     let mut dependency_items = Vec::new();
     for entry in closure {
@@ -354,9 +356,17 @@ fn build_plan(
         } else {
             Action::Install
         };
+        let root = wanted
+            .iter()
+            .find(|w| {
+                deps::recursive_dependency_names(index, &w.name, DepOptions::default())
+                    .contains(&entry.name)
+            })
+            .map(FormulaEntry::full_name)
+            .unwrap_or_default();
         // `installed_on_request` stays true when an existing receipt says so.
         let on_request = deps::installed_on_request(cfg, &entry.name);
-        dependency_items.push(make_item(cfg, &entry, action, false, on_request)?);
+        dependency_items.push(make_item(cfg, &entry, action, Some(&root), on_request)?);
     }
     let mut items = dependency_items;
     items.append(&mut plan.items);
@@ -368,7 +378,7 @@ fn make_item(
     cfg: &Config,
     formula: &FormulaEntry,
     action: Action,
-    requested: bool,
+    root: Option<&str>,
     installed_on_request: bool,
 ) -> Result<Item> {
     let bottle = plan::require_bottle(cfg, formula)?;
@@ -379,7 +389,8 @@ fn make_item(
         formula: formula.clone(),
         bottle,
         action,
-        requested,
+        requested: root.is_none(),
+        root: root.unwrap_or_default().to_string(),
         installed_on_request,
         existing,
         was_linked,
@@ -424,20 +435,17 @@ fn fetch_plan(
     plan: &Plan,
     opts: &InstallOptions,
 ) -> Result<HashMap<String, Download>> {
-    let deps: Vec<String> = plan
-        .items
-        .iter()
-        .filter(|i| !i.requested)
-        .map(|i| i.name().to_string())
-        .collect();
-    if !deps.is_empty()
-        && !opts.quiet
-        && let Some(root) = plan.roots.first()
-    {
-        output::ohai(&format!(
-            "Fetching dependencies for {root}: {}",
-            resolve::to_sentence(&deps, "and")
-        ));
+    if !opts.quiet {
+        for root in &plan.roots {
+            let deps = plan.dependencies_of(root);
+            if deps.is_empty() {
+                continue;
+            }
+            output::ohai(&format!(
+                "Fetching dependencies for {root}: {}",
+                resolve::to_sentence(&deps, "and")
+            ));
+        }
     }
     if !opts.quiet {
         for item in &plan.items {
@@ -688,7 +696,7 @@ fn depends_on_failed(index: &Index, item: &Item, failed: &HashSet<String>) -> bo
         .any(|d| failed.contains(d))
 }
 
-fn print_install_header(plan: &Plan, item: &Item, opts: &InstallOptions, mode: Mode) {
+fn print_install_header(item: &Item, opts: &InstallOptions, mode: Mode) {
     if opts.quiet {
         return;
     }
@@ -699,8 +707,7 @@ fn print_install_header(plan: &Plan, item: &Item, opts: &InstallOptions, mode: M
         } else {
             "Installing"
         };
-        let root = plan.roots.first().cloned().unwrap_or_default();
-        output::ohai(&format!("{verb} {root} dependency: {name}"));
+        output::ohai(&format!("{verb} {} dependency: {name}", item.root));
         return;
     }
     match item.action {
