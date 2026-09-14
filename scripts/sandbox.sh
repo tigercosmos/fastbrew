@@ -42,6 +42,9 @@ cache="$dir/cache"
 home="$dir/home"
 bottle_tag() {
   local arch os major name
+  # The platform module lets FASTBREW_BOTTLE_TAG override the detected tag, so
+  # the sandbox must seed the API file for the tag the binary will ask for.
+  if [[ -n "${FASTBREW_BOTTLE_TAG:-}" ]]; then echo "$FASTBREW_BOTTLE_TAG"; return; fi
   arch="$(uname -m)"; [[ "$arch" == "arm64" ]] || arch="x86_64"
   os="$(sw_vers -productVersion 2>/dev/null || echo 0)"
   major="${os%%.*}"

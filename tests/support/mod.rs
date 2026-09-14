@@ -18,7 +18,10 @@ use std::sync::OnceLock;
 use assert_cmd::prelude::*;
 use tempfile::TempDir;
 
+use fastbrew::api::index::Index;
 use fastbrew::config::Config;
+use fastbrew::model::FormulaEntry;
+use fastbrew::platform::Host;
 
 /// True when the test should be skipped because there is no sandbox.
 pub fn skip_unless_sandbox() -> bool {
@@ -59,35 +62,15 @@ pub fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// The bottle tag the binary under test will use: the host's, or whatever
+/// `FASTBREW_BOTTLE_TAG` overrides it with. Never hard-code a tag in a test.
 pub fn bottle_tag() -> String {
-    let arch = if cfg!(target_arch = "aarch64") {
-        "arm64_"
-    } else {
-        ""
-    };
-    let product = Command::new("/usr/bin/sw_vers")
-        .arg("-productVersion")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    let major: u32 = product
-        .split('.')
-        .next()
-        .unwrap_or("0")
-        .parse()
-        .unwrap_or(0);
-    let name = match major {
-        27 => "golden_gate",
-        26 => "tahoe",
-        15 => "sequoia",
-        14 => "sonoma",
-        13 => "ventura",
-        12 => "monterey",
-        11 => "big_sur",
-        _ => "unknown",
-    };
-    format!("{arch}{name}")
+    Host::detect().bottle_tag().to_string()
+}
+
+/// Root of the shared test tree under `target/`.
+fn tests_root() -> PathBuf {
+    repo_root().join("target/sandbox-tests")
 }
 
 /// The cached packages file to seed sandboxes from: the ambient
@@ -126,7 +109,7 @@ pub fn shared_cache() -> Option<&'static PathBuf> {
     CACHE
         .get_or_init(|| {
             let seed = seed_packages_file()?;
-            let cache = repo_root().join("target/sandbox-tests/cache");
+            let cache = tests_root().join("cache");
             let target = cache.join(format!("api/internal/packages.{}.jws.json", bottle_tag()));
             std::fs::create_dir_all(target.parent()?).ok()?;
             if !target.is_file() {
@@ -138,6 +121,53 @@ pub fn shared_cache() -> Option<&'static PathBuf> {
             Some(cache)
         })
         .as_ref()
+}
+
+/// The fast index over the seeded API file, for the tag under test. Every
+/// version, checksum and bottle property a test asserts on must come from
+/// here, never from a literal: the API moves and the tag differs per runner.
+pub fn api_index() -> Option<&'static Index> {
+    static INDEX: OnceLock<Option<Index>> = OnceLock::new();
+    INDEX
+        .get_or_init(|| {
+            shared_cache()?;
+            let cfg = Config::for_test(&tests_root());
+            Index::load(&cfg, &Host::detect().bottle_tag()).ok()
+        })
+        .as_ref()
+}
+
+/// The API entry for `name`, or `None` when there is no cached API file.
+pub fn api_formula(name: &str) -> Option<FormulaEntry> {
+    api_index()?.formula(name)
+}
+
+/// Current `<version>[_<revision>]` of `name` in the seeded API file.
+///
+/// Panics when the formula is missing; call it only from a test that already
+/// holds a [`Sandbox`], which implies the API file is there.
+pub fn api_pkg_version(name: &str) -> String {
+    api_formula(name)
+        .unwrap_or_else(|| panic!("{name} is missing from the cached API index"))
+        .pkg_version()
+}
+
+/// A version string that sorts strictly before `version`, for simulating a keg
+/// left behind by an older release without pinning the test to one.
+///
+/// Homebrew compares versions token by token, so decrementing the last
+/// non-zero numeric token always yields an older version.
+pub fn older_version(version: &str) -> String {
+    let mut parts: Vec<String> = version.split('.').map(str::to_string).collect();
+    for part in parts.iter_mut().rev() {
+        if let Ok(n) = part.parse::<u64>()
+            && n > 0
+        {
+            *part = (n - 1).to_string();
+            return parts.join(".");
+        }
+    }
+    format!("0.{version}")
 }
 
 pub struct Sandbox {
