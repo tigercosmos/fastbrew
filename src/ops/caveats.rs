@@ -374,6 +374,49 @@ mod tests {
     }
 
     #[test]
+    fn service_block_offers_brew_services_and_the_manual_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cfg, keg) = keg_with(tmp.path(), &["bin"]);
+        let mut formula = FormulaEntry {
+            name: "demo".into(),
+            service_run_args: vec![serde_json::json!([
+                "$HOMEBREW_PREFIX/opt/demo/bin/demod",
+                "--config",
+                "$HOMEBREW_PREFIX/etc/demo.conf"
+            ])],
+            ..Default::default()
+        };
+        let text = service_caveats(&cfg, &formula, &keg).unwrap();
+        assert_eq!(
+            text,
+            format!(
+                "To start demo now and restart at login:\n  \
+                 brew services start demo\n\
+                 Or, if you don't want/need a background service you can just run:\n  \
+                 {prefix}/opt/demo/bin/demod --config {prefix}/etc/demo.conf\n",
+                prefix = cfg.prefix.display()
+            )
+        );
+
+        // `require_root` switches to the daemon wording.
+        formula.service_args = vec![serde_json::json!([":require_root", true])];
+        let text = service_caveats(&cfg, &formula, &keg).unwrap();
+        assert!(
+            text.starts_with(
+                "To start demo now and restart at startup:\n  sudo brew services start demo\n"
+            ),
+            "{text}"
+        );
+
+        // A formula with no runnable service says nothing.
+        let plain = FormulaEntry {
+            name: "demo".into(),
+            ..Default::default()
+        };
+        assert_eq!(service_caveats(&cfg, &plain, &keg), None);
+    }
+
+    #[test]
     fn keg_only_block_lists_the_paths_that_exist() {
         let tmp = tempfile::tempdir().unwrap();
         let (cfg, keg) = keg_with(tmp.path(), &["bin", "lib", "include"]);

@@ -197,8 +197,10 @@ pub fn install_formulae_with(
         }
     }
 
-    print_messages(&messages);
+    // `Homebrew::Install.finish_installation` cleans up first and displays the
+    // recorded caveats last.
     finish_run(cfg, index, &plan, opts)?;
+    print_messages(&messages);
 
     if !failed.is_empty() {
         return Err(Error::user(format!(
@@ -311,9 +313,9 @@ fn build_plan(
             match plan::already_installed(cfg, index, root, opts.only_dependencies) {
                 Already::NotInstalled => Action::Install,
                 Already::Outdated => Action::Upgrade,
-                Already::UpToDate { message } | Already::NotLinked { message } => {
+                Already::Installed { notice } => {
                     if !opts.quiet {
-                        output::opoo(&message);
+                        notice.print();
                     }
                     // Homebrew still records the explicit request.
                     mark_installed_on_request(cfg, &root.name);
@@ -736,17 +738,16 @@ fn print_messages(messages: &[(String, caveats::Caveats)]) {
     if notes.is_empty() && with_text.is_empty() {
         return;
     }
+    // `Messages#display_caveats` prints one `==> Caveats` heading, the shared
+    // completion notices, then each package's caveats under its own `==> name`
+    // heading (`force_caveats: true` makes that happen even for one package).
     output::ohai("Caveats");
     for note in notes {
         println!("{}", note.trim_end_matches('\n'));
     }
     for (name, c) in with_text {
         let Some(text) = &c.text else { continue };
-        if messages.len() == 1 {
-            println!("{}", text.trim_end_matches('\n'));
-        } else {
-            output::ohai_with(name, text.trim_end_matches('\n'));
-        }
+        output::ohai_with(name, text.trim_end_matches('\n'));
     }
 }
 

@@ -278,9 +278,14 @@ fn cleanup_formula_downloads(sweeper: &mut Sweeper<'_>, index: &Index, name: &st
     }
 }
 
-/// `Cleanup.stale_formula?` for a `$CACHE/<name>[_bottle_manifest]--<version>`
-/// entry: stale when the API's current version is not the cached one, when the
-/// cache is being scrubbed, or when the file is older than the age limit.
+/// `Cleanup.stale?` plus `stale_formula?` for a
+/// `$CACHE/<name>[_bottle_manifest]--<version>` entry.
+///
+/// Only regular files (or symlinks to them) are ever stale: a cache *directory*
+/// is left to the age-based sweep. An entry is stale when the API's current
+/// version is not the cached one, or, with `-s`, when the formula it belongs to
+/// is not installed at its latest version — `brew cleanup -s` keeps the
+/// downloads of what is installed.
 fn stale_download(sweeper: &Sweeper<'_>, index: &Index, path: &Path) -> bool {
     let base = path
         .file_name()
@@ -290,11 +295,14 @@ fn stale_download(sweeper: &Sweeper<'_>, index: &Index, path: &Path) -> bool {
     if base.ends_with(".incomplete") {
         return true;
     }
-    if sweeper.opts.scrub {
-        return true;
+    if !std::fs::metadata(path)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+    {
+        return false;
     }
     let Some((prefix, rest)) = base.split_once("--") else {
-        return is_older_than(path, sweeper.days());
+        return false;
     };
     let (formula, manifest) = match prefix.strip_suffix("_bottle_manifest") {
         Some(name) => (name, true),
@@ -303,7 +311,7 @@ fn stale_download(sweeper: &Sweeper<'_>, index: &Index, path: &Path) -> bool {
     // An entry naming a formula the API does not know is left alone, exactly
     // as `stale_formula?` bails out when `Formulary.from_rack` finds nothing.
     let Some(current) = index.formula_pkg_version(formula) else {
-        return is_older_than(path, sweeper.days());
+        return false;
     };
     let rebuild = index
         .formula(formula)
@@ -319,7 +327,10 @@ fn stale_download(sweeper: &Sweeper<'_>, index: &Index, path: &Path) -> bool {
     if rest != wanted && !rest.starts_with(&format!("{wanted}.")) {
         return true;
     }
-    is_older_than(path, sweeper.days())
+    let latest_installed = crate::keg::installed_kegs(sweeper.cfg, formula)
+        .iter()
+        .any(|k| k.version == PkgVersion::parse(&current));
+    sweeper.opts.scrub && !latest_installed
 }
 
 /// `Cleanup#cleanup_cask`: drop cached downloads that are not the current
@@ -389,10 +400,12 @@ fn remove_with_link(sweeper: &mut Sweeper<'_>, path: &Path) {
     }
 }
 
-/// `Cleanup#cleanup_cache`: stale and `.incomplete` downloads, anything older
-/// than `days`, and finally the downloads nothing in the cache references.
+/// `Cleanup#cleanup_cache`: `.incomplete` files, entries past the age limit,
+/// stale downloads, and finally the downloads nothing in the cache references.
 fn cleanup_cache(sweeper: &mut Sweeper<'_>, index: &Index) {
     let cfg = sweeper.cfg;
+    let days = sweeper.days();
+    let pruning = sweeper.opts.prune_days.is_some();
 
     for path in cache_children(cfg) {
         let name = path
@@ -403,7 +416,20 @@ fn cleanup_cache(sweeper: &mut Sweeper<'_>, index: &Index) {
         if name == ".cleaned" || name == "api" || name == "downloads" || name == "Cask" {
             continue;
         }
-        if stale_download(sweeper, index, &path) {
+        if name.ends_with(".incomplete") {
+            remove_with_link(sweeper, &path);
+            continue;
+        }
+        if is_older_than(&path, days) {
+            // A directory only goes when its name looks like a cached download.
+            let is_dir = path.is_dir() && !path.is_symlink();
+            if !is_dir || name.contains("--") {
+                remove_with_link(sweeper, &path);
+            }
+            continue;
+        }
+        // `--prune` replaces the (expensive) staleness check entirely.
+        if !pruning && stale_download(sweeper, index, &path) {
             remove_with_link(sweeper, &path);
         }
     }

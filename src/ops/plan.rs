@@ -288,81 +288,158 @@ pub fn check_relocatable(
 /// (`Homebrew::Install.install_formula?`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Already {
-    /// Nothing is installed: go ahead.
+    /// Nothing relevant is installed: go ahead.
     NotInstalled,
-    /// Installed and outdated: upgrade in place.
+    /// Installed and outdated, and nothing blocks the upgrade.
     Outdated,
-    /// Installed at the current version and linked: warn and skip.
-    UpToDate { message: String },
-    /// Installed at the current version but not linked: warn and skip.
-    NotLinked { message: String },
+    /// Installed already: print `notice` and skip.
+    Installed { notice: Notice },
+}
+
+/// Which of Homebrew's reporters prints the "already installed" text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notice {
+    /// `opoo`: a warning on stderr.
+    Warning(String),
+    /// `onoe`: an error on stderr that does not by itself fail the run.
+    Error(String),
+}
+
+impl Notice {
+    pub fn message(&self) -> &str {
+        match self {
+            Notice::Warning(m) | Notice::Error(m) => m,
+        }
+    }
+
+    /// Print it the way `install/check.rb` does.
+    pub fn print(&self) {
+        match self {
+            Notice::Warning(m) => crate::output::opoo(m),
+            Notice::Error(m) => crate::output::onoe(m),
+        }
+    }
+}
+
+/// Version recorded in `var/homebrew/linked/<name>`, the only thing
+/// `Formula#linked?` and `#linked_version` look at.
+pub fn linked_version(cfg: &Config, name: &str) -> Option<String> {
+    let record = cfg.linked_record(name);
+    if !record.is_symlink() {
+        return None;
+    }
+    let target = std::fs::read_link(&record).ok()?;
+    Some(target.file_name()?.to_str()?.to_string())
+}
+
+/// Version `opt/<name>` points at (`Keg.for(formula.opt_prefix).version`).
+fn optlinked_version(cfg: &Config, name: &str) -> Option<String> {
+    let record = cfg.opt_record(name);
+    if !record.is_symlink() {
+        return None;
+    }
+    let target = std::fs::read_link(&record).ok()?;
+    Some(target.file_name()?.to_str()?.to_string())
 }
 
 /// Decide what to print (and whether to install) for a requested formula that
-/// may already be installed.
+/// may already be installed. Port of `Homebrew::Install.install_formula?`,
+/// restricted to the stable-bottle cases fastbrew handles.
 pub fn already_installed(
     cfg: &Config,
     index: &Index,
     formula: &FormulaEntry,
     only_dependencies: bool,
 ) -> Already {
-    let kegs = keg::installed_kegs(cfg, &formula.name);
+    let name = &formula.name;
+    let kegs = keg::installed_kegs(cfg, name);
     if kegs.is_empty() {
         return Already::NotInstalled;
     }
-    let name = &formula.name;
     let full_name = formula.full_name();
     let pkg_version = formula.pkg_version();
     let pinned = keg::is_pinned(cfg, name);
     let outdated = is_outdated(cfg, index, name);
+    let unpin = if pinned {
+        format!("brew unpin {full_name} && ")
+    } else {
+        String::new()
+    };
 
+    // A keg-only formula is checked against its `opt` record first: installing
+    // a second version silently would break everything linked against it.
+    if formula.is_keg_only() {
+        let optlinked = optlinked_version(cfg, name);
+        if let Some(optlinked) = optlinked {
+            if outdated {
+                if !cfg.no_install_upgrade && !pinned {
+                    return Already::Outdated;
+                }
+                return Already::Installed {
+                    notice: Notice::Error(format!(
+                        "{full_name} {optlinked} is already installed.\nTo upgrade to {pkg_version}, run:\n  {unpin}brew upgrade {full_name}"
+                    )),
+                };
+            }
+            if only_dependencies {
+                return Already::NotInstalled;
+            }
+            return Already::Installed {
+                notice: Notice::Warning(format!(
+                    "{full_name} {pkg_version} is already installed and up-to-date.\nTo reinstall {pkg_version}, run:\n  brew reinstall {name}"
+                )),
+            };
+        }
+    }
+
+    let installed_this_version = kegs
+        .iter()
+        .any(|k| k.version == PkgVersion::parse(&pkg_version));
+    let linked = linked_version(cfg, name);
+
+    if installed_this_version {
+        let message = format!("{full_name} {pkg_version} is already installed");
+        return match &linked {
+            Some(v) if *v != pkg_version => Already::Installed {
+                notice: Notice::Warning(format!(
+                    "{message}.\nThe currently linked version is: {v}"
+                )),
+            },
+            None if only_dependencies => Already::NotInstalled,
+            None => Already::Installed {
+                notice: Notice::Warning(format!(
+                    "{message}, it's just not linked.\nTo link this version, run:\n  brew link {full_name}"
+                )),
+            },
+            Some(_) => Already::Installed {
+                notice: Notice::Warning(format!(
+                    "{message} and up-to-date.\nTo reinstall {pkg_version}, run:\n  brew reinstall {name}"
+                )),
+            },
+        };
+    }
+
+    // Only other versions are installed.
     if outdated && !cfg.no_install_upgrade && !pinned {
         return Already::Outdated;
     }
     if only_dependencies {
         return Already::NotInstalled;
     }
-
-    let installed_this_version = kegs
-        .iter()
-        .any(|k| k.version == PkgVersion::parse(&pkg_version));
-    let linked = keg::linked_keg(cfg, name);
-    let linked_version = linked.as_ref().map(|k| k.version.to_string());
-
-    if !installed_this_version {
-        // Only older versions are installed and something stops the upgrade.
-        let newest = kegs
-            .last()
-            .map(|k| k.version.to_string())
-            .unwrap_or_default();
-        let unpin = if pinned {
-            format!("brew unpin {full_name} && ")
-        } else {
-            String::new()
-        };
-        return Already::UpToDate {
-            message: format!(
-                "{full_name} {newest} is already installed.\nTo upgrade to {pkg_version}, run:\n  {unpin}brew upgrade {full_name}"
-            ),
-        };
-    }
-
-    match linked_version {
-        Some(v) if v == pkg_version => Already::UpToDate {
-            message: format!(
-                "{full_name} {pkg_version} is already installed and up-to-date.\nTo reinstall {pkg_version}, run:\n  brew reinstall {name}"
-            ),
+    match linked {
+        Some(installed) if outdated => Already::Installed {
+            notice: Notice::Error(format!(
+                "{name} {installed} is already installed\nTo upgrade to {pkg_version}, run:\n  {unpin}brew upgrade {full_name}"
+            )),
         },
-        Some(v) => Already::UpToDate {
-            message: format!(
-                "{full_name} {pkg_version} is already installed.\nThe currently linked version is: {v}"
-            ),
+        Some(installed) => Already::Installed {
+            notice: Notice::Error(format!(
+                "{name} {installed} is already installed\nTo install {pkg_version}, first run:\n  brew unlink {name}"
+            )),
         },
-        None => Already::NotLinked {
-            message: format!(
-                "{full_name} {pkg_version} is already installed, it's just not linked.\nTo link this version, run:\n  brew link {full_name}"
-            ),
-        },
+        // Nothing is linked, so `FormulaInstaller` handles it: install the new
+        // version beside the old one.
+        None => Already::NotInstalled,
     }
 }
 
