@@ -489,6 +489,19 @@ fn a_taps_external_command_is_listed_and_executed() {
     );
 }
 
+/// `untap` of a tap that is not installed is `TapUnavailableError`, which
+/// names the command that would create it.
+#[test]
+fn untap_of_a_missing_tap_names_the_tap_new_command() {
+    let env = env_or_skip!();
+    let out = env.run(&["untap", "no/such"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)),
+        "Error: No available tap no/such.\nRun brew tap-new no/such to create a new no/such tap!\n"
+    );
+}
+
 // ---------------------------------------------------------- general CLI
 
 /// `brew` with no arguments prints `HOMEBREW_HELP_MESSAGE` on stderr and

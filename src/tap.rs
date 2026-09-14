@@ -429,7 +429,7 @@ pub fn tap_with_outcome(
             "Tapping {} is no longer typically necessary.\n\
              Add {} if you are sure you need it for contributing to Homebrew.",
             tap.name(),
-            output::underline("--force")
+            output::green("--force")
         )));
     }
 
@@ -509,7 +509,24 @@ pub fn untap(cfg: &Config, name: &str, force: bool) -> Result<()> {
     let tap = Tap::parse(name).ok_or_else(|| Error::user(format!("Invalid tap name: '{name}'")))?;
     let path = tap.path(cfg);
     if !path.is_dir() {
-        return Err(Error::user(format!("No available tap {}.\n", tap.name())));
+        // `TapUnavailableError#initialize`: the core taps are offered
+        // `brew tap --force`, everything else `brew tap-new`.
+        let command = if tap.is_core() || tap.is_cask() {
+            format!("brew tap --force {}", tap.name())
+        } else {
+            format!("brew tap-new {}", tap.name())
+        };
+        let what = if tap.is_core() || tap.is_cask() {
+            format!("tap {}", tap.name())
+        } else {
+            format!("create a new {} tap", tap.name())
+        };
+        return Err(Error::user(format!(
+            "No available tap {}.\nRun {} to {}!\n",
+            tap.name(),
+            output::green(&command),
+            what
+        )));
     }
 
     if !force {

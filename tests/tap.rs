@@ -194,8 +194,13 @@ fn tap_enumerate_parse_update_and_untap() {
     assert!(!path.exists());
     assert!(!tap::installed_taps(&cfg).contains(&t));
 
+    // `TapUnavailableError` names the command that would create the tap.
     let err = tap::untap(&cfg, "testuser/test", false).expect_err("not tapped");
-    assert_eq!(err.to_string(), "No available tap testuser/test.\n");
+    assert_eq!(
+        support::strip_ansi(&err.to_string()),
+        "No available tap testuser/test.\n\
+         Run brew tap-new testuser/test to create a new testuser/test tap!\n"
+    );
 }
 
 #[test]
