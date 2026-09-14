@@ -521,12 +521,7 @@ fn run_install_step(ctx: &StepContext<'_>, step: &Step) -> Result<()> {
         "delete_keychain_certificate" => delete_keychain_certificate(ctx, step)?,
         other => {
             return Err(Error::user(format!(
-                "Unknown cask install step '{other}'. Run `brew {} <cask>` instead.",
-                if matches!(other, "" | "run") {
-                    "reinstall --cask"
-                } else {
-                    "install --cask"
-                }
+                "Unknown cask install step '{other}'; use `brew install --cask` for this cask."
             )));
         }
     }
