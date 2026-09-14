@@ -175,6 +175,7 @@ fn cask_options(ctx: &Ctx, args: &InstallArgs, reinstall: bool) -> CaskInstallOp
         installed_as_dependency: false,
         zap: false,
         upgrade: false,
+        dependency_chain: Vec::new(),
     }
 }
 

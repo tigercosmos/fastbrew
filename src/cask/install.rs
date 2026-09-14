@@ -41,6 +41,9 @@ pub struct CaskInstallOptions {
     pub zap: bool,
     /// Set while `upgrade_cask_entry` drives the install.
     pub upgrade: bool,
+    /// Tokens of the casks whose dependency closure this install is part of,
+    /// outermost first. Empty for a cask named on the command line.
+    pub dependency_chain: Vec<String>,
 }
 
 impl CaskInstallOptions {
@@ -987,6 +990,38 @@ pub fn pretty_name(symbol: &str) -> String {
 
 // ------------------------------------------------------- dependencies
 
+/// `Cask::Installer#cask_and_formula_dependencies`' cycle checks, done along the
+/// chain of casks that are installing each other rather than over a graph.
+///
+/// Without this a mutual dependency recurses until the dependency's own cask
+/// lock is refused, which reports contention with this very process instead of
+/// the loop that caused it.
+fn check_dependency_cycle(
+    cask: &CaskEntry,
+    opts: &CaskInstallOptions,
+    dependency: &str,
+) -> Result<()> {
+    let token = super::token_from_full_token(&cask.token);
+    let dependency = super::token_from_full_token(dependency);
+    if dependency == token {
+        // `CaskSelfReferencingDependencyError`.
+        return Err(Error::user(format!("Cask '{token}' depends on itself.")));
+    }
+    let Some(start) = opts.dependency_chain.iter().position(|t| t == dependency) else {
+        return Ok(());
+    };
+    // `CaskCyclicDependencyError`: the cycle is named after the cask the run
+    // started from, and lists the rest of the loop.
+    let root = opts.dependency_chain.first().cloned().unwrap_or_default();
+    let mut members: Vec<String> = opts.dependency_chain[start..].to_vec();
+    members.push(token.to_string());
+    members.retain(|t| *t != root);
+    Err(Error::user(format!(
+        "Cask '{root}' includes cyclic dependencies on other Casks: {}",
+        crate::resolve::to_sentence(&members, "and")
+    )))
+}
+
 fn install_dependencies(
     cfg: &Config,
     index: Option<&Index>,
@@ -994,6 +1029,11 @@ fn install_dependencies(
     cask: &CaskEntry,
     opts: &CaskInstallOptions,
 ) -> Result<()> {
+    // A loop is an error whether or not the cask it runs through happens to be
+    // installed already, so it is checked before the installed ones drop out.
+    for token in cask.cask_dependencies() {
+        check_dependency_cycle(cask, opts, &token)?;
+    }
     let formulae: Vec<String> = cask
         .formula_dependencies()
         .into_iter()
@@ -1033,6 +1073,14 @@ fn install_dependencies(
                 dep_opts.installed_as_dependency = true;
                 dep_opts.reinstall = false;
                 dep_opts.upgrade = false;
+                dep_opts
+                    .dependency_chain
+                    .push(super::token_from_full_token(&cask.token).to_string());
+                // Installing a dependency writes its Caskroom entry and moves
+                // its artifacts, so it needs its own lock exactly as a named
+                // cask does (`Cask::Cask#lock`); the top-level lock the caller
+                // holds only guards the cask that pulled it in.
+                let _lock = crate::keg::lock::lock_cask(cfg, &dependency.token)?;
                 install_cask_entry(cfg, Some(index), dirs, &dependency, &dep_opts)?;
             }
         }

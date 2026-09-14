@@ -1073,6 +1073,113 @@ fn a_binary_artifact_will_not_overwrite_an_existing_file() {
     assert!(!env.appdir().join(app).exists());
 }
 
+/// Write a fixture cask whose container is seeded, with `extra` stanzas.
+fn write_app_cask(env: &Env, token: &str, app: &str, extra: &str) {
+    let url = fixture_url(token, "1.0");
+    let sha = env.seed_app_zip(&url, app, "1.0");
+    env.write_cask(token, &app_cask_rb(token, "1.0", &url, &sha, app, extra));
+}
+
+/// A dependency's install writes its own Caskroom entry and moves its own
+/// artifacts, so it runs under its own cask lock: the lock the named cask holds
+/// says nothing about the casks it drags in.
+#[test]
+fn a_cask_dependency_is_installed_under_its_own_lock() {
+    let env = env_or_skip!();
+    let child = "fastbrew-dep-child";
+    let parent = "fastbrew-dep-parent";
+    let child_app = "FastbrewDepChild.app";
+    let parent_app = "FastbrewDepParent.app";
+    write_app_cask(&env, child, child_app, "");
+    write_app_cask(
+        &env,
+        parent,
+        parent_app,
+        &format!("  depends_on cask: \"fixture/casks/{child}\"\n"),
+    );
+
+    // Another process is already working on the dependency.
+    let held = fastbrew::keg::lock::lock_cask(&env.config(), child).expect("take the cask lock");
+    let report = env.combined(&["install", "--cask", parent]);
+    assert!(
+        report.contains(&format!(
+            "A `brew` process has already locked {}",
+            env.caskroom(child).display()
+        )),
+        "the dependency's lock has to be taken and reported:\n{report}"
+    );
+    assert!(
+        !env.appdir().join(child_app).exists(),
+        "the dependency was installed while another process held its lock:\n{report}"
+    );
+    assert!(
+        !env.caskroom(child).join("1.0").exists(),
+        "the dependency was staged under a held lock:\n{report}"
+    );
+    drop(held);
+
+    // Released, the same command installs both.
+    let out = env.run(&["install", "--cask", parent]);
+    assert!(
+        out.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(env.appdir().join(child_app).is_dir());
+    assert!(env.appdir().join(parent_app).is_dir());
+    let _ = env.run(&["uninstall", "--cask", parent, child]);
+}
+
+/// Casks that depend on each other must fail with the loop that caused it
+/// (`CaskCyclicDependencyError`, `CaskSelfReferencingDependencyError`) rather
+/// than recurse until one of the locks reports contention with this very run.
+#[test]
+fn mutually_dependent_casks_fail_with_the_cycle() {
+    let env = env_or_skip!();
+    let a = "fastbrew-cycle-a";
+    let b = "fastbrew-cycle-b";
+    write_app_cask(
+        &env,
+        a,
+        "FastbrewCycleA.app",
+        &format!("  depends_on cask: \"fixture/casks/{b}\"\n"),
+    );
+    write_app_cask(
+        &env,
+        b,
+        "FastbrewCycleB.app",
+        &format!("  depends_on cask: \"fixture/casks/{a}\"\n"),
+    );
+
+    let report = env.combined(&["install", "--cask", a]);
+    assert!(
+        report.contains(&format!(
+            "Cask '{a}' includes cyclic dependencies on other Casks: {b}"
+        )),
+        "the cycle has to be named:\n{report}"
+    );
+    assert!(
+        !report.contains("has already locked"),
+        "a cycle must not surface as lock contention:\n{report}"
+    );
+    assert!(!env.caskroom(a).join("1.0").exists(), "{report}");
+    assert!(!env.caskroom(b).join("1.0").exists(), "{report}");
+
+    let self_token = "fastbrew-cycle-self";
+    write_app_cask(
+        &env,
+        self_token,
+        "FastbrewCycleSelf.app",
+        &format!("  depends_on cask: \"fixture/casks/{self_token}\"\n"),
+    );
+    let report = env.combined(&["install", "--cask", self_token]);
+    assert!(
+        report.contains(&format!("Cask '{self_token}' depends on itself.")),
+        "{report}"
+    );
+    assert!(!env.caskroom(self_token).join("1.0").exists(), "{report}");
+}
+
 /// Writing the install records is part of the same transaction as the
 /// artifacts: a failure there purges the staged files and the version
 /// metadata, so the app has to come back out of the app directory with them.
