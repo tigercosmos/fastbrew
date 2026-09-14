@@ -45,7 +45,12 @@ pub fn uninstall_formulae(
             kegs
         } else {
             // `default_kegs`: the linked keg, else the only installed one.
-            match keg::linked_keg(cfg, &name) {
+            // `linked_keg` canonicalises, which would leave the keg path
+            // outside `$CELLAR` when the prefix itself sits behind a symlink;
+            // rebuild it under the configured Cellar so `unlink` recognises
+            // the prefix links as its own.
+            match keg::linked_keg(cfg, &name).map(|k| Keg::new(cfg, &name, &k.version.to_string()))
+            {
                 Some(linked) => vec![linked],
                 None if kegs.len() == 1 => kegs,
                 None => {

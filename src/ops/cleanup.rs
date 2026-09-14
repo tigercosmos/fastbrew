@@ -258,43 +258,68 @@ pub fn eligible_kegs_for_cleanup(cfg: &Config, index: &Index, name: &str, quiet:
         .collect()
 }
 
-/// `Cleanup#formula_cache_paths` plus `stale_formula?`.
+/// `Cleanup#formula_cache_paths` plus `stale_formula?`, for one formula.
 fn cleanup_formula_downloads(sweeper: &mut Sweeper<'_>, index: &Index, name: &str) {
     let cfg = sweeper.cfg;
-    let current = index.formula_pkg_version(name);
-    let rebuild = index.formula(name).map(|e| e.bottle_rebuild).unwrap_or(0);
+    let manifest_prefix = format!("{name}_bottle_manifest");
     for path in cache_children(cfg) {
         let Some(base) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let Some((prefix, rest)) = base.split_once("--") else {
+        let Some((prefix, _)) = base.split_once("--") else {
             continue;
         };
-        let manifest = prefix == format!("{name}_bottle_manifest");
-        if prefix != name && !manifest {
+        if prefix != name && prefix != manifest_prefix {
             continue;
         }
-        let stale = match &current {
-            None => true,
-            Some(current) => {
-                let wanted = if manifest {
-                    if rebuild > 0 {
-                        format!("{current}-{rebuild}")
-                    } else {
-                        current.clone()
-                    }
-                } else {
-                    current.clone()
-                };
-                !(rest == wanted || rest.starts_with(&format!("{wanted}.")))
-            }
-        };
-        let stale = stale || sweeper.opts.scrub || is_older_than(&path, sweeper.days());
-        if !stale {
-            continue;
+        if stale_download(sweeper, index, &path) {
+            remove_with_link(sweeper, &path);
         }
-        remove_with_link(sweeper, &path);
     }
+}
+
+/// `Cleanup.stale_formula?` for a `$CACHE/<name>[_bottle_manifest]--<version>`
+/// entry: stale when the API's current version is not the cached one, when the
+/// cache is being scrubbed, or when the file is older than the age limit.
+fn stale_download(sweeper: &Sweeper<'_>, index: &Index, path: &Path) -> bool {
+    let base = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    if base.ends_with(".incomplete") {
+        return true;
+    }
+    if sweeper.opts.scrub {
+        return true;
+    }
+    let Some((prefix, rest)) = base.split_once("--") else {
+        return is_older_than(path, sweeper.days());
+    };
+    let (formula, manifest) = match prefix.strip_suffix("_bottle_manifest") {
+        Some(name) => (name, true),
+        None => (prefix, false),
+    };
+    // An entry naming a formula the API does not know is left alone, exactly
+    // as `stale_formula?` bails out when `Formulary.from_rack` finds nothing.
+    let Some(current) = index.formula_pkg_version(formula) else {
+        return is_older_than(path, sweeper.days());
+    };
+    let rebuild = index
+        .formula(formula)
+        .map(|e| e.bottle_rebuild)
+        .unwrap_or(0);
+    // Manifests are cached under `<version>[-<rebuild>]`, blobs under
+    // `<version>.<tag>.bottle[...].tar.gz`.
+    let wanted = if manifest && rebuild > 0 {
+        format!("{current}-{rebuild}")
+    } else {
+        current.clone()
+    };
+    if rest != wanted && !rest.starts_with(&format!("{wanted}.")) {
+        return true;
+    }
+    is_older_than(path, sweeper.days())
 }
 
 /// `Cleanup#cleanup_cask`: drop cached downloads that are not the current
@@ -364,12 +389,10 @@ fn remove_with_link(sweeper: &mut Sweeper<'_>, path: &Path) {
     }
 }
 
-/// `Cleanup#cleanup_cache`: `.incomplete` files, unreferenced downloads and
-/// anything older than `days`.
+/// `Cleanup#cleanup_cache`: stale and `.incomplete` downloads, anything older
+/// than `days`, and finally the downloads nothing in the cache references.
 fn cleanup_cache(sweeper: &mut Sweeper<'_>, index: &Index) {
     let cfg = sweeper.cfg;
-    let days = sweeper.days();
-    let scrub = sweeper.opts.scrub;
 
     for path in cache_children(cfg) {
         let name = path
@@ -380,11 +403,7 @@ fn cleanup_cache(sweeper: &mut Sweeper<'_>, index: &Index) {
         if name == ".cleaned" || name == "api" || name == "downloads" || name == "Cask" {
             continue;
         }
-        if name.ends_with(".incomplete") {
-            remove_with_link(sweeper, &path);
-            continue;
-        }
-        if scrub || is_older_than(&path, days) {
+        if stale_download(sweeper, index, &path) {
             remove_with_link(sweeper, &path);
         }
     }
@@ -399,7 +418,6 @@ fn cleanup_cache(sweeper: &mut Sweeper<'_>, index: &Index) {
         .filter_map(|p| std::fs::canonicalize(p).ok())
         .collect();
     let Ok(entries) = std::fs::read_dir(&downloads) else {
-        let _ = index;
         return;
     };
     let mut orphans: Vec<PathBuf> = entries

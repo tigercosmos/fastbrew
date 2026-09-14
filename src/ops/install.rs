@@ -173,15 +173,10 @@ pub fn install_formulae_with(
             }
         }
         print_install_header(&plan, item, opts, mode);
-        if let Some(download) = downloads.get(item.name()) {
-            output::ohai(&format!(
-                "Pouring {}",
-                download
-                    .blob
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-            ));
+        if !opts.quiet {
+            // `ohai "Pouring #{downloadable.downloader.basename}"`: the
+            // bottle's own name, not the hashed cache file name.
+            output::ohai(&format!("Pouring {}", item.bottle.filename()));
         }
 
         match finish_item(cfg, index, &plan, item, &downloads, opts) {
