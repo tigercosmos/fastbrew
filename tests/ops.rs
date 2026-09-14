@@ -578,6 +578,23 @@ fn upgrades_jq_from_a_simulated_older_keg() {
         "--dry-run changes nothing"
     );
 
+    // A pinned formula named explicitly is refused and fails the run.
+    sb.ok(&["pin", "jq"]);
+    let refused = sb.fails(&["upgrade", "jq"]);
+    assert!(
+        refused.contains("Not upgrading 1 pinned package:"),
+        "{refused}"
+    );
+    assert!(refused.contains(&format!("jq {new_version}")), "{refused}");
+    assert!(sb.keg("jq", old_version).is_dir(), "{refused}");
+    // A bare `upgrade` only warns about it.
+    let warned = sb.ok(&["upgrade"]);
+    assert!(
+        warned.contains("Warning: Not upgrading 1 pinned package:"),
+        "{warned}"
+    );
+    sb.ok(&["unpin", "jq"]);
+
     let out = sb.ok(&["upgrade", "jq"]);
     assert!(out.contains("==> Upgrading 1 outdated package:"), "{out}");
     assert!(out.contains("==> Upgrading jq"), "{out}");

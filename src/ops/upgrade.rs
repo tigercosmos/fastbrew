@@ -32,11 +32,15 @@ pub fn upgrade_formulae(
     let named = !names.is_empty();
     let outdated = outdated::outdated_formulae(cfg, index, Some(names))?;
 
+    // `ofail`ed blocks: Homebrew prints them and then exits 1. Collecting them
+    // lets fastbrew reproduce both the text and the exit status through one
+    // `Result`, without printing anything twice.
+    let mut failures: Vec<String> = Vec::new();
     if named {
-        report_not_outdated(cfg, index, names, opts)?;
+        failures.extend(report_not_outdated(cfg, index, names, opts));
     }
     if outdated.is_empty() {
-        return Ok(());
+        return finish(failures);
     }
 
     let (pinned, upgradeable): (Vec<_>, Vec<_>) = outdated.into_iter().partition(|f| f.pinned);
@@ -54,50 +58,37 @@ pub fn upgrade_formulae(
         output::ohai(&format!(
             "{verb} {} outdated {}:",
             upgradeable.len(),
-            if upgradeable.len() == 1 {
-                "package"
-            } else {
-                "packages"
-            }
+            packages(upgradeable.len())
         ));
         println!("{}", format_upgrade_summary(&descriptions(&upgradeable)));
     }
 
     if !pinned.is_empty() {
-        let message = format!(
-            "Not upgrading {} pinned {}:",
+        let block = format!(
+            "Not upgrading {} pinned {}:\n{}",
             pinned.len(),
-            if pinned.len() == 1 {
-                "package"
-            } else {
-                "packages"
-            }
-        );
-        // Naming a pinned formula explicitly is an error; a bare `upgrade`
-        // only warns.
-        if named {
-            output::onoe(&message);
-        } else {
-            output::opoo(&message);
-        }
-        println!(
-            "{}",
+            packages(pinned.len()),
             pinned
                 .iter()
                 .map(|f| format!("{} {}", f.name, f.current_version))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        // Naming a pinned formula explicitly is an error (`ofail`); a bare
+        // `upgrade` only warns.
+        if named {
+            failures.push(block);
+        } else {
+            let (message, list) = block.split_once('\n').unwrap_or((&block, ""));
+            output::opoo(message);
+            println!("{list}");
+        }
     }
 
-    if upgradeable.is_empty() {
-        return Ok(());
-    }
-    if opts.dry_run {
-        return Ok(());
+    if upgradeable.is_empty() || opts.dry_run {
+        return finish(failures);
     }
 
-    let mut failed: Vec<String> = Vec::new();
     for formula in &upgradeable {
         if !opts.quiet {
             output::ohai(&format!("Upgrading {}", formula.name));
@@ -122,43 +113,45 @@ pub fn upgrade_formulae(
         );
         match result {
             Ok(()) => migrate_pin(cfg, &formula.name),
-            Err(e) => {
-                output::onoe(&format!("{}: {e}", formula.name));
-                failed.push(formula.name.clone());
-            }
+            Err(e) => failures.push(format!("{}: {e}", formula.name)),
         }
     }
 
-    if failed.is_empty() {
+    finish(failures)
+}
+
+/// Turn the collected `ofail` blocks into one error, so they print exactly once
+/// and the command still exits 1.
+fn finish(failures: Vec<String>) -> Result<()> {
+    if failures.is_empty() {
         Ok(())
     } else {
-        Err(Error::user(format!(
-            "Failed to upgrade {}",
-            crate::resolve::to_sentence(&failed, "and")
-        )))
+        Err(Error::user(failures.join("\n")))
     }
 }
 
-/// `cmd/upgrade.rb`: named formulae that are not outdated get a notice.
+/// `cmd/upgrade.rb`: named formulae that are not outdated get a notice, and a
+/// name that is not installed at all is an `ofail`.
 fn report_not_outdated(
     cfg: &Config,
     index: &Index,
     names: &[String],
     opts: &UpgradeOptions,
-) -> Result<()> {
+) -> Vec<String> {
+    let mut failures = Vec::new();
     for name in names {
         if !outdated::outdated_kegs(cfg, index, name).is_empty() {
             continue;
         }
         match keg::latest_keg(cfg, name) {
-            None => output::onoe(&format!("{name} not installed")),
+            None => failures.push(format!("{name} not installed")),
             Some(k) if !opts.quiet => {
                 output::opoo(&format!("{name} {} already installed", k.version));
             }
             Some(_) => {}
         }
     }
-    Ok(())
+    failures
 }
 
 /// `cmd/upgrade.rb#formula_upgrade_descriptions`.
@@ -242,10 +235,13 @@ fn migrate_pin(cfg: &Config, name: &str) {
     let _ = keg::make_relative_symlink(&record, &latest.path);
 }
 
-/// `Utils.pluralize("package", n)` for the headers above.
-#[allow(dead_code)]
+/// `Utils.pluralize("package", n)` without the count, which the headers above
+/// print themselves.
 fn packages(count: usize) -> String {
     pluralize("package", count)
+        .split_once(' ')
+        .map(|(_, stem)| stem.to_string())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
