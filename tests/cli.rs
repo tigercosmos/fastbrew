@@ -337,3 +337,93 @@ fn update_falls_back_to_the_cached_api_file_when_offline() {
         "Already up-to-date."
     );
 }
+
+// ---------------------------------------------------------------------------
+// Install planning: one item per formula, and planning writes nothing
+// ---------------------------------------------------------------------------
+
+/// stdout and stderr joined: `ohai` prints to stdout, warnings to stderr.
+fn combined(out: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+fn receipt(sandbox: &Sandbox, name: &str, version: &str) -> serde_json::Value {
+    let path = sandbox
+        .prefix
+        .join("Cellar")
+        .join(name)
+        .join(version)
+        .join("INSTALL_RECEIPT.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("no receipt at {}: {e}", path.display()));
+    serde_json::from_str(&text).expect("the receipt is valid JSON")
+}
+
+/// Naming a formula that another named formula depends on must not queue the
+/// same keg twice: the plan carries one deduplicated, dependency-ordered item
+/// per formula, and the explicitly named one stays requested.
+#[test]
+fn naming_a_dependency_does_not_duplicate_it_in_the_plan() {
+    let sandbox = sandbox_or_skip!();
+    let out = sandbox.run(&["install", "--dry-run", "jq", "oniguruma"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let plan = combined(&out);
+
+    assert!(plan.contains("==> Would install 2 formulae:"), "{plan}");
+    assert!(
+        plan.lines().any(|l| l == "jq oniguruma"),
+        "both are requested, in the order they were named:\n{plan}"
+    );
+    assert_eq!(
+        plan.matches("oniguruma").count(),
+        1,
+        "oniguruma is requested, so it is not also listed as jq's dependency:\n{plan}"
+    );
+    assert!(
+        !plan.contains("Would install 1 dependency for jq:"),
+        "{plan}"
+    );
+    assert!(!sandbox.prefix.join("Cellar/jq").exists());
+}
+
+/// `--dry-run` plans and prints; it must not touch a receipt. Homebrew records
+/// the explicit request for an already-installed formula, but only during the
+/// locked install itself.
+#[test]
+fn install_dry_run_leaves_the_receipt_alone() {
+    let sandbox = sandbox_or_skip!();
+    let version = support::api_pkg_version("jq");
+    sandbox.add_keg("jq", &version, false);
+    assert_eq!(
+        receipt(&sandbox, "jq", &version)["installed_on_request"],
+        false
+    );
+
+    let out = sandbox.run(&["install", "--dry-run", "jq"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let text = combined(&out);
+    assert!(
+        text.contains(&format!(
+            "jq {version} is already installed and up-to-date."
+        )),
+        "{text}"
+    );
+    assert_eq!(
+        receipt(&sandbox, "jq", &version)["installed_on_request"],
+        false,
+        "planning must not write a receipt:\n{text}"
+    );
+
+    // The real run does record it.
+    let out = sandbox.run(&["install", "jq"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    assert_eq!(
+        receipt(&sandbox, "jq", &version)["installed_on_request"],
+        true,
+        "the locked install records the explicit request"
+    );
+}

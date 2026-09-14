@@ -649,6 +649,127 @@ fn autoremoves_orphaned_dependencies_and_cleans_the_cache() {
 }
 
 // ---------------------------------------------------------------------------
+// Locks
+// ---------------------------------------------------------------------------
+
+/// `var/homebrew/locks/<name>.formula.lock`, held by another process for as
+/// long as the guard lives — what a concurrent `brew` looks like from here.
+struct LockHolder {
+    child: std::process::Child,
+}
+
+impl LockHolder {
+    fn take(sb: &Sandbox, name: &str) -> LockHolder {
+        const SCRIPT: &str = concat!(
+            "import fcntl, os, sys, time\n",
+            "path = sys.argv[1]\n",
+            "os.makedirs(os.path.dirname(path), exist_ok=True)\n",
+            "handle = open(path, 'a+')\n",
+            "fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n",
+            "sys.stdout.write('ready\\n')\n",
+            "sys.stdout.flush()\n",
+            "time.sleep(300)\n",
+        );
+        let path = sb
+            .prefix
+            .join("var/homebrew/locks")
+            .join(format!("{name}.formula.lock"));
+        let mut child = Command::new("python3")
+            .arg("-c")
+            .arg(SCRIPT)
+            .arg(&path)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn the lock holder");
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.as_mut().expect("holder stdout")),
+            &mut line,
+        )
+        .expect("the holder reports the lock it took");
+        assert_eq!(line.trim(), "ready", "the holder could not take the lock");
+        LockHolder { child }
+    }
+}
+
+impl Drop for LockHolder {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Every destructive operation on a rack takes the formula lock, so neither
+/// `uninstall --force` nor `cleanup` can delete a keg out from under another
+/// `brew`. Contention is `OperationInProgressError`; `cleanup` reports it and
+/// carries on with the rest of the run.
+#[test]
+fn forced_uninstall_and_cleanup_wait_for_the_formula_lock() {
+    let Some(sb) = sandbox() else { return };
+    if !network() {
+        return;
+    }
+    sb.ok(&["install", "jq"]);
+    let version = api_version(&sb, "jq");
+    let old_version = older_version(&version);
+    assert_ne!(version, old_version);
+
+    // An older, unlinked keg, so `cleanup` has something eligible to remove.
+    let old_keg = sb.keg("jq", &old_version);
+    std::fs::create_dir_all(old_keg.join("bin")).unwrap();
+    std::fs::write(
+        old_keg.join("INSTALL_RECEIPT.json"),
+        serde_json::json!({
+            "installed_on_request": true,
+            "runtime_dependencies": [],
+            "source": {
+                "spec": "stable",
+                "versions": {"stable": old_version, "version_scheme": 0},
+                "tap": "homebrew/core"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let held = LockHolder::take(&sb, "jq");
+    let locked = format!(
+        "A `brew` process has already locked {}",
+        sb.prefix.join("Cellar/jq").display()
+    );
+
+    // `--force` used to skip the lock entirely.
+    let refused = sb.fails(&["uninstall", "--force", "jq"]);
+    assert!(refused.contains(&locked), "{refused}");
+    assert!(
+        refused.contains("Please wait for it to finish or terminate it to continue."),
+        "{refused}"
+    );
+    assert!(sb.keg("jq", &version).is_dir(), "the current keg survives");
+    assert!(old_keg.is_dir(), "the older keg survives");
+
+    // `cleanup` warns about the rack it cannot lock instead of aborting.
+    let out = sb.ok(&["cleanup"]);
+    assert!(out.contains(&locked), "{out}");
+    assert!(
+        old_keg.is_dir(),
+        "no keg of a locked rack is removed:\n{out}"
+    );
+    assert!(sb.keg("jq", &version).is_dir(), "{out}");
+
+    // Once the lock is free both go through.
+    drop(held);
+    let cleaned = sb.ok(&["cleanup"]);
+    assert!(
+        cleaned.contains(&format!("Removing: {}", old_keg.display())),
+        "{cleaned}"
+    );
+    assert!(!old_keg.exists());
+    sb.ok(&["uninstall", "--force", "jq"]);
+    assert!(!sb.prefix.join("Cellar/jq").exists());
+}
+
+// ---------------------------------------------------------------------------
 // Unit-level tests that need no network
 // ---------------------------------------------------------------------------
 

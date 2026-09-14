@@ -571,3 +571,197 @@ fn commands_lists_a_taps_external_command() {
     let tap_info = sandbox.stdout(&["tap-info", "tiger/cmds"]);
     assert!(tap_info.contains("\n==> Commands\ngreet\n"), "{tap_info}");
 }
+
+// ---------------------------------------------------------------------------
+// A tap formula reaches the install plan as itself: qualification survives the
+// CLI, and its own `depends_on` list is what gets expanded.
+// ---------------------------------------------------------------------------
+
+/// A tap formula with a `bottle do` block for the host tag. `root_url` points
+/// at a host that does not resolve, so nothing is ever downloaded.
+fn tap_formula_rb(class_name: &str, version: &str, tag: &str, depends_on: &[&str]) -> String {
+    let deps: String = depends_on
+        .iter()
+        .map(|d| format!("  depends_on \"{d}\"\n"))
+        .collect();
+    format!(
+        r#"class {class_name} < Formula
+  desc "Tap formula for the install-plan tests"
+  homepage "https://example.com/{class_name}"
+  url "https://example.com/{class_name}-{version}.tar.gz"
+  sha256 "7777777777777777777777777777777777777777777777777777777777777777"
+  license "MIT"
+
+{deps}
+  bottle do
+    root_url "https://bottles.invalid/v2/review/fixture"
+    sha256 cellar: :any_skip_relocation, {tag}: "8888888888888888888888888888888888888888888888888888888888888888"
+  end
+end
+"#
+    )
+}
+
+/// Build a git repository shaped like a tap from `name -> file body` pairs.
+fn make_tap_remote(dir: &Path, files: &[(&str, String)]) {
+    std::fs::create_dir_all(dir.join("Formula")).expect("mkdir Formula");
+    for (name, body) in files {
+        std::fs::write(dir.join("Formula").join(format!("{name}.rb")), body).expect("write");
+    }
+    git(dir, &["init", "--initial-branch=main", "--quiet"]);
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "--quiet", "-m", "Add formulae"]);
+}
+
+/// stdout and stderr of one run, joined: `ohai` prints to stdout and the
+/// warnings to stderr.
+fn combined(out: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// A tap formula that shadows a core name must win when it is named with its
+/// tap: the plan is the tap's `jq` 99.0, not core's `jq` and its `oniguruma`.
+#[test]
+fn a_tapped_name_plans_the_taps_formula_not_the_core_one() {
+    let Some(sandbox) = Sandbox::new() else {
+        eprintln!("no cached Homebrew API file available; skipping");
+        return;
+    };
+    let tag = support::bottle_tag();
+    let remote = tempfile::tempdir().expect("tempdir");
+    make_tap_remote(
+        remote.path(),
+        &[("jq", tap_formula_rb("Jq", "99.0", &tag, &[]))],
+    );
+    let url = format!("file://{}", remote.path().display());
+    let out = sandbox.run(&["tap", "review/fixture", &url]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // `info` already resolved the tap's formula; the plan has to agree.
+    let info = sandbox.stdout(&["info", "review/fixture/jq"]);
+    assert!(
+        info.starts_with("==> review/fixture/jq: stable 99.0"),
+        "{info}"
+    );
+
+    let out = sandbox.run(&["install", "--dry-run", "review/fixture/jq"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let plan = combined(&out);
+    assert!(plan.contains("==> Would install 1 formula:"), "{plan}");
+    assert!(
+        plan.lines().any(|l| l.trim() == "jq"),
+        "the tap's jq is the only thing planned:\n{plan}"
+    );
+    assert!(
+        !plan.contains("oniguruma"),
+        "core jq's dependency must not appear:\n{plan}"
+    );
+
+    // The bare name still means core, which does pull oniguruma in.
+    let core = combined(&sandbox.run(&["install", "--dry-run", "jq"]));
+    assert!(core.contains("oniguruma"), "{core}");
+
+    // --- A keg installed from the tap is compared against the tap ---------
+    let keg = sandbox.prefix.join("Cellar/jq/98.0");
+    std::fs::create_dir_all(&keg).expect("mkdir keg");
+    std::fs::write(
+        keg.join("INSTALL_RECEIPT.json"),
+        serde_json::json!({
+            "installed_on_request": true,
+            "runtime_dependencies": [],
+            "source": {
+                "spec": "stable",
+                "versions": {"stable": "98.0", "version_scheme": 0},
+                "tap": "review/fixture"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write receipt");
+    support::symlink("../Cellar/jq/98.0", &sandbox.prefix.join("opt/jq"));
+    support::symlink(
+        "../../../Cellar/jq/98.0",
+        &sandbox.prefix.join("var/homebrew/linked/jq"),
+    );
+
+    let listed = sandbox.stdout(&["list", "--full-name"]);
+    assert!(
+        listed.lines().any(|l| l == "review/fixture/jq"),
+        "the receipt's tap names the keg:\n{listed}"
+    );
+
+    let outdated = sandbox.stdout(&["outdated", "--verbose"]);
+    assert!(
+        outdated.contains("jq (98.0) < 99.0"),
+        "outdated compares against the tap's version:\n{outdated}"
+    );
+
+    let upgrade = combined(&sandbox.run(&["upgrade", "--dry-run", "jq"]));
+    assert!(
+        upgrade.contains("jq 98.0 -> 99.0"),
+        "upgrade plans the tap's version:\n{upgrade}"
+    );
+    assert!(
+        sandbox.prefix.join("Cellar/jq/98.0").is_dir(),
+        "--dry-run changes nothing"
+    );
+}
+
+/// A tap formula's `depends_on` reaches the install plan, and a dependency
+/// that resolves nowhere is `FormulaUnavailableError`, never a silent skip.
+#[test]
+fn tap_formula_dependencies_are_planned_and_never_skipped() {
+    let Some(sandbox) = Sandbox::new() else {
+        eprintln!("no cached Homebrew API file available; skipping");
+        return;
+    };
+    let tag = support::bottle_tag();
+    let remote = tempfile::tempdir().expect("tempdir");
+    make_tap_remote(
+        remote.path(),
+        &[
+            ("foo", tap_formula_rb("Foo", "1.0", &tag, &["jq"])),
+            ("bar", tap_formula_rb("Bar", "1.0", &tag, &["nosuchdep"])),
+        ],
+    );
+    let url = format!("file://{}", remote.path().display());
+    let out = sandbox.run(&["tap", "tiger/deps", &url]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // `deps` and the plan agree: jq, and jq's own oniguruma.
+    let listed = sandbox.stdout(&["deps", "tiger/deps/foo"]);
+    assert!(listed.lines().any(|l| l == "jq"), "{listed}");
+    assert!(listed.lines().any(|l| l == "oniguruma"), "{listed}");
+
+    let plan = combined(&sandbox.run(&["install", "--dry-run", "tiger/deps/foo"]));
+    assert!(plan.contains("==> Would install 1 formula:"), "{plan}");
+    assert!(
+        plan.contains("Would install 2 dependencies for tiger/deps/foo:"),
+        "the tap formula's dependencies are planned:\n{plan}"
+    );
+    assert!(plan.contains("jq"), "{plan}");
+    assert!(plan.contains("oniguruma"), "{plan}");
+
+    // An unresolvable required dependency stops the run.
+    let out = sandbox.run(&["install", "--dry-run", "tiger/deps/bar"]);
+    assert_eq!(out.status.code(), Some(1), "{}", combined(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "No available formula with the name \"nosuchdep\" (dependency of tiger/deps/bar)"
+        ),
+        "{stderr}"
+    );
+}
