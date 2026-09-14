@@ -769,6 +769,36 @@ fn forced_uninstall_and_cleanup_wait_for_the_formula_lock() {
     assert!(!sb.prefix.join("Cellar/jq").exists());
 }
 
+/// `cleanup` removes a rack that holds nothing, but that is a write like any
+/// other: `--dry-run` must leave it, and the real removal belongs under the
+/// rack's formula lock.
+#[test]
+fn a_dry_run_cleanup_keeps_an_empty_rack() {
+    let Some(sb) = sandbox() else { return };
+
+    let rack = sb.prefix.join("Cellar/fbemptyrack");
+    std::fs::create_dir_all(&rack).unwrap();
+
+    sb.ok(&["cleanup", "--dry-run", "fbemptyrack"]);
+    assert!(rack.is_dir(), "a dry run writes nothing");
+
+    // Another `brew` holding the rack's lock keeps it there too.
+    let held = LockHolder::take(&sb, "fbemptyrack");
+    let out = sb.ok(&["cleanup", "fbemptyrack"]);
+    assert!(
+        out.contains(&format!(
+            "A `brew` process has already locked {}",
+            rack.display()
+        )),
+        "{out}"
+    );
+    assert!(rack.is_dir(), "a locked rack is left alone:\n{out}");
+
+    drop(held);
+    sb.ok(&["cleanup", "fbemptyrack"]);
+    assert!(!rack.exists(), "the real run removes it");
+}
+
 // ---------------------------------------------------------------------------
 // Unit-level tests that need no network
 // ---------------------------------------------------------------------------

@@ -184,7 +184,11 @@ fn print_no_install_cleanup_disable_message(cfg: &Config) {
 fn cleanup_formula(sweeper: &mut Sweeper<'_>, index: &Index, name: &str) {
     let eligible = eligible_kegs_for_cleanup(sweeper.cfg, index, name, sweeper.quiet);
     let leftovers = leftover_dirs(sweeper.cfg, name);
-    let _lock = if (eligible.is_empty() && leftovers.is_empty()) || sweeper.opts.dry_run {
+    // An empty rack goes too, so a run that finds nothing else to do still has
+    // something to remove — and still needs the lock for it.
+    let nothing_to_do =
+        eligible.is_empty() && leftovers.is_empty() && !is_empty_rack(sweeper.cfg, name);
+    let lock = if nothing_to_do || sweeper.opts.dry_run {
         // A dry run removes nothing, so it needs no lock.
         None
     } else {
@@ -222,9 +226,18 @@ fn cleanup_formula(sweeper: &mut Sweeper<'_>, index: &Index, name: &str) {
         sweeper.remove(&path, move || std::fs::remove_dir_all(&target));
     }
     // `remove_dir` only succeeds on an empty directory, so a rack that held
-    // nothing but leftovers goes away with them.
-    let _ = std::fs::remove_dir(sweeper.cfg.rack(name));
+    // nothing but leftovers goes away with them. Removing a directory is a
+    // write, so it happens only under the lock and never on a dry run.
+    if lock.is_some() {
+        let _ = std::fs::remove_dir(sweeper.cfg.rack(name));
+    }
+    drop(lock);
     cleanup_formula_downloads(sweeper, index, name);
+}
+
+/// Whether the rack exists and holds nothing at all.
+fn is_empty_rack(cfg: &Config, name: &str) -> bool {
+    std::fs::read_dir(cfg.rack(name)).is_ok_and(|mut entries| entries.next().is_none())
 }
 
 /// Directories a killed install or reinstall left in a rack.
