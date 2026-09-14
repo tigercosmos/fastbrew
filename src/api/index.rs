@@ -304,11 +304,13 @@ impl Index {
         self.n_casks
     }
 
-    fn formula_index(&self, name: &str) -> Option<usize> {
+    /// Row index of a formula name, for the compact scan tables.
+    pub fn formula_index(&self, name: &str) -> Option<usize> {
         self.find_in_table("f_names", "f_names_idx", name)
     }
 
-    fn cask_index(&self, token: &str) -> Option<usize> {
+    /// Row index of a cask token, for the compact scan tables.
+    pub fn cask_index(&self, token: &str) -> Option<usize> {
         self.find_in_table("c_tokens", "c_tokens_idx", token)
     }
 
@@ -1282,7 +1284,7 @@ mod tests {
         let tag = crate::platform::Host::detect().bottle_tag();
 
         let t0 = Instant::now();
-        let index = Index::rebuild(&cfg, &tag).expect("build index");
+        let _ = Index::rebuild(&cfg, &tag).expect("build index");
         let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         let t1 = Instant::now();
