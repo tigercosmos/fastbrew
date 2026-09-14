@@ -474,6 +474,74 @@ fn deps_include_flags_widen_the_graph() {
 }
 
 #[test]
+fn deps_uses_recorded_runtime_dependencies_for_installed_formulae() {
+    let sandbox = sandbox_or_skip!();
+    sandbox.add_keg("jq", "1.8.2", true);
+
+    // The fake receipt records no runtime dependencies, so Homebrew (and
+    // fastbrew) report none for the installed formula rather than walking the
+    // declared graph.
+    assert_eq!(sandbox.stdout(&["deps", "jq"]), "");
+    // A flag that asks for the declared graph switches back to the API data.
+    assert_eq!(
+        sandbox.stdout(&["deps", "--tree", "jq"]),
+        "jq\n└── oniguruma\n\n"
+    );
+
+    // Without `HOMEBREW_NO_ENV_HINTS` the mismatch is announced on stderr.
+    let out = sandbox
+        .cmd()
+        .env_remove("HOMEBREW_NO_ENV_HINTS")
+        .args(["deps", "--tree", "jq"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with(
+            "Warning: `fastbrew deps` is not the actual runtime dependencies because --tree was passed!\n"
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn info_cask_prints_artifacts_with_resolved_paths() {
+    let sandbox = sandbox_or_skip!();
+    let out = sandbox
+        .cmd()
+        .env("HOMEBREW_CASK_OPTS", "--appdir=/Applications")
+        .args(["info", "--cask", "ghostty"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.starts_with("==> ghostty (Ghostty): "), "{text}");
+    assert!(text.contains(" (auto_updates)\n"), "{text}");
+    assert!(text.contains("\nNot installed\n"), "{text}");
+    assert!(
+        text.contains(
+            "From: https://github.com/Homebrew/homebrew-cask/blob/HEAD/Casks/g/ghostty.rb\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n==> Artifacts\nGhostty.app (App)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("/Applications/Ghostty.app/Contents/Resources/man/man1/ghostty.1 (Manpage)"),
+        "{text}"
+    );
+
+    let out = sandbox.run(&["info", "--cask", "nonexistentxyz"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim(),
+        "Error: Cask 'nonexistentxyz' is unavailable: No Cask with this name exists."
+    );
+}
+
+#[test]
 fn list_is_empty_in_a_fresh_sandbox() {
     let sandbox = sandbox_or_skip!();
     assert_eq!(sandbox.stdout(&["list"]), "");

@@ -309,12 +309,26 @@ Installed: `==> jq: stable 1.8.2 (bottled)`, then desc, homepage, `Installed`,
 `/opt/homebrew/Cellar/jq/1.8.2 (20 files, 1.2MB) *` (asterisk when linked),
 `  Poured from bottle using the formulae.brew.sh API on 2026-05-06 at 10:36:12`,
 `From: ...`, `License: ...`, `==> Dependencies`, `==> Options` when any,
-`==> Caveats`, `==> Analytics` (skip unless requested). Outdated formulae show
-`stable 1.8.1 → 1.8.2` in the title. `==> Installed Versions` header only with
+`==> Caveats`, `==> Analytics` (skip unless requested). The title's spec list
+is `stable <pkg_version>` plus ` (bottled)` when a bottle exists and `, HEAD`
+when a head spec exists; an outdated install rewrites the first spec as
+`<installed pkg_version> → stable <new> (bottled)` (`cmd/info.rb`:
+`specs[0] = "#{installed_version} → #{upgrade_version}"`, so the arrow comes
+before the whole spec, not just the version). A keg-only formula appends
+` [keg-only]` after the spec list. `==> Installed Versions` header only with
 `--verbose`. Deprecated/disabled lines follow the homepage. The formula path
 in `From:` is `Formula/<first letter>/<name>.rb` (`Formula/lib/` for names
 starting with `lib`? No: Homebrew uses sharded dirs: names starting with
 `lib` go to `Formula/lib/`, otherwise `Formula/<first char>/`).
+
+`deps`: when every named formula is installed and none of `--direct`,
+`--tree`, `--skip-recommended`, `--missing`, `--include-implicit`,
+`--include-build`, `--include-test` or `--include-optional` is passed,
+Homebrew reports the installed keg's recorded `runtime_dependencies` instead
+of the declared graph; otherwise it prints the env hint ``Warning: `brew deps`
+is not the actual runtime dependencies because <reason>!`` (suppressed by
+`HOMEBREW_NO_ENV_HINTS`). `--tree` draws `├── `/`└── ` with `│   `/four-space
+indents and a blank line after each root.
 
 `list`: names in columns like `ls -C` on a TTY, one per line otherwise.
 `list --versions`: `name version [version ...]`. `outdated`: names; with

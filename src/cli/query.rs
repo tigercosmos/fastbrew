@@ -401,6 +401,7 @@ pub fn print_cask_info(ctx: &Ctx, cask: &CaskEntry) {
         .filter(|a| !matches!(a.kind.as_str(), "uninstall" | "zap"))
         .collect();
     if !shown.is_empty() {
+        let appdir = cask_appdir(cfg);
         output::ohai("Artifacts");
         for a in shown {
             let summary = a
@@ -409,7 +410,7 @@ pub fn print_cask_info(ctx: &Ctx, cask: &CaskEntry) {
                 .and_then(|v| v.as_array())
                 .and_then(|arr| arr.first())
                 .and_then(Value::as_str)
-                .map(str::to_string)
+                .map(|s| s.replace("$APPDIR", &appdir))
                 .unwrap_or_else(|| a.kind.clone());
             println!("{summary} ({})", english_name(&a.kind));
         }
@@ -418,6 +419,15 @@ pub fn print_cask_info(ctx: &Ctx, cask: &CaskEntry) {
         output::ohai("Caveats");
         println!("{}", cfg.expand_placeholders(&caveats));
     }
+}
+
+/// The resolved cask app directory: `--appdir=` from `HOMEBREW_CASK_OPTS`,
+/// else Homebrew's default `/Applications`.
+fn cask_appdir(cfg: &Config) -> String {
+    cfg.cask_opts
+        .iter()
+        .find_map(|opt| opt.strip_prefix("--appdir=").map(str::to_string))
+        .unwrap_or_else(|| "/Applications".to_string())
 }
 
 /// `AbstractArtifact.english_name`: `command_wrapper` -> `Command Wrapper`.
@@ -583,7 +593,7 @@ pub fn search(ctx: &Ctx, args: &SearchArgs) -> Result<()> {
     }
 
     let parsed = SearchQuery::parse(&query)?;
-    let formulae = if want_formulae {
+    let mut formulae = if want_formulae {
         match &parsed {
             SearchQuery::Regex(re) => index.search_formula_names_regex(re),
             SearchQuery::Text(t) => index.search_formula_names(t),
@@ -591,7 +601,7 @@ pub fn search(ctx: &Ctx, args: &SearchArgs) -> Result<()> {
     } else {
         vec![]
     };
-    let casks = if want_casks {
+    let mut casks = if want_casks {
         match &parsed {
             SearchQuery::Regex(re) => index.search_cask_tokens_regex(re),
             SearchQuery::Text(t) => index.search_cask_tokens(t),
@@ -599,6 +609,30 @@ pub fn search(ctx: &Ctx, args: &SearchArgs) -> Result<()> {
     } else {
         vec![]
     };
+
+    // `Search.search_formulae`/`search_casks` add spell-checker hits for plain
+    // text queries: appended (not re-sorted) for formulae, sorted in for casks.
+    if let SearchQuery::Text(text) = &parsed {
+        if want_formulae {
+            for hit in resolve::spell_check(text, &index.formula_names()) {
+                if !formulae.contains(&hit) {
+                    formulae.push(hit);
+                }
+            }
+        }
+        if want_casks {
+            casks.extend(resolve::spell_check(text, &index.cask_tokens()));
+            casks.sort();
+            casks.dedup();
+        }
+    }
+
+    // An alias is dropped when the formula it points at is also a result.
+    let found: std::collections::HashSet<String> = formulae.iter().cloned().collect();
+    formulae.retain(|name| match index.formula_alias(name) {
+        Some(target) => !found.contains(&target),
+        None => true,
+    });
 
     let tty = output::stdout_is_tty();
     if !formulae.is_empty() {
@@ -1248,6 +1282,8 @@ pub fn deps(ctx: &Ctx, args: &DepsArgs) -> Result<()> {
         ));
     };
 
+    let runtime = runtime_dependencies_mode(ctx, args, &roots);
+
     if args.tree {
         for root in &roots {
             println!("{root}");
@@ -1260,7 +1296,7 @@ pub fn deps(ctx: &Ctx, args: &DepsArgs) -> Result<()> {
 
     if args.for_each || (args.installed && args.names.is_empty()) {
         for root in &roots {
-            let mut d = collect_deps(index, root, opts, recursive);
+            let mut d = collect_deps(ctx, index, root, opts, recursive, runtime);
             d.sort();
             println!("{root}: {}", render_deps(ctx, index, &d, args).join(" "));
         }
@@ -1269,7 +1305,7 @@ pub fn deps(ctx: &Ctx, args: &DepsArgs) -> Result<()> {
 
     let mut all: Option<Vec<String>> = None;
     for root in &roots {
-        let d = collect_deps(index, root, opts, recursive);
+        let d = collect_deps(ctx, index, root, opts, recursive, runtime);
         all = Some(match all {
             None => d,
             Some(prev) if args.union => {
@@ -1302,11 +1338,79 @@ pub fn deps(ctx: &Ctx, args: &DepsArgs) -> Result<()> {
     Ok(())
 }
 
-fn collect_deps(index: &Index, root: &str, opts: DepOptions, recursive: bool) -> Vec<String> {
+fn collect_deps(
+    ctx: &Ctx,
+    index: &Index,
+    root: &str,
+    opts: DepOptions,
+    recursive: bool,
+    runtime: bool,
+) -> Vec<String> {
+    if runtime && let Some(names) = recorded_runtime_dependencies(ctx, root) {
+        return names;
+    }
     if recursive {
         deps::recursive_dependency_names(index, root, opts)
     } else {
         deps::direct_dependency_names(index, root, opts, true)
+    }
+}
+
+/// The runtime closure the installed keg recorded, in receipt order.
+fn recorded_runtime_dependencies(ctx: &Ctx, name: &str) -> Option<Vec<String>> {
+    let receipt = keg::latest_keg(&ctx.cfg, name)?.receipt().ok()?;
+    Some(
+        receipt
+            .runtime_dependency_names()
+            .into_iter()
+            .map(|full| deps::short_name(full).to_string())
+            .collect(),
+    )
+}
+
+/// Port of `Homebrew::Cmd::Deps#use_runtime_dependencies?`: an installed
+/// formula reports what its keg actually links against unless a flag asks for
+/// the declared graph instead. The mismatch prints Homebrew's env hint.
+fn runtime_dependencies_mode(ctx: &Ctx, args: &DepsArgs, roots: &[String]) -> bool {
+    let all_installed = !roots.is_empty()
+        && roots
+            .iter()
+            .all(|r| !keg::installed_kegs(&ctx.cfg, r).is_empty());
+    let reason: Option<&str> = if !all_installed {
+        Some(if args.installed {
+            "not all the named formulae were installed"
+        } else {
+            "`--installed` was not passed"
+        })
+    } else if args.direct {
+        Some("--direct was passed")
+    } else if args.tree {
+        Some("--tree was passed")
+    } else if args.skip_recommended {
+        Some("--skip-recommended was passed")
+    } else if args.missing {
+        Some("--missing was passed")
+    } else if args.include_implicit {
+        Some("--include-implicit was passed")
+    } else if args.include_build {
+        Some("--include-build was passed")
+    } else if args.include_test {
+        Some("--include-test was passed")
+    } else if args.include_optional {
+        Some("--include-optional was passed")
+    } else {
+        None
+    };
+    match reason {
+        None => true,
+        Some(reason) => {
+            if !ctx.cfg.no_env_hints {
+                output::opoo(&format!(
+                    "`fastbrew deps` is not the actual runtime dependencies because {reason}!\nThis means dependencies may differ from a formula's declared dependencies.\nHide these hints with `HOMEBREW_NO_ENV_HINTS=1` (see `man brew`)."
+                ));
+            }
+            false
+        }
     }
 }
 
