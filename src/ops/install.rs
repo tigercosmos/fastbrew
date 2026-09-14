@@ -594,13 +594,14 @@ fn pour_all(
     downloads: &HashMap<String, Download>,
     opts: &InstallOptions,
 ) -> HashMap<String, Result<()>> {
-    // `reinstall` and `upgrade` replace a keg that may still be linked.
+    // `reinstall` and `upgrade` replace a keg that may still be linked. An
+    // upgrade can land on a directory that is already there: `outdated` counts
+    // the current version as outdated while it is neither linked nor
+    // opt-linked, so `upgrade` pours the very version that sits in the rack.
     for item in &plan.items {
-        if item.action == Action::Reinstall {
-            for existing in &item.existing {
-                if existing.version.to_string() == item.pkg_version() {
-                    let _ = keg::link::unlink(cfg, existing, LinkOptions::default());
-                }
+        for existing in &item.existing {
+            if existing.version.to_string() == item.pkg_version() {
+                let _ = keg::link::unlink(cfg, existing, LinkOptions::default());
             }
         }
     }
@@ -621,7 +622,11 @@ fn pour_all(
 
 fn pour_one(cfg: &Config, item: &Item, download: &Download, _opts: &InstallOptions) -> Result<()> {
     let pkg_version = item.pkg_version();
-    let replace = item.action == Action::Reinstall;
+    let replace = item.action == Action::Reinstall
+        || item
+            .existing
+            .iter()
+            .any(|k| k.version.to_string() == pkg_version);
     let keg_path =
         extract::extract_bottle(cfg, &download.blob, item.name(), &pkg_version, replace)?;
 
