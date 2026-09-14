@@ -427,7 +427,7 @@ fn build_plan(
             // `installed_on_request` stays true when an existing receipt says so.
             let on_request = deps::installed_on_request(cfg, &entry.name);
             let item = make_item(cfg, index, &entry, dep_action, Some(&root_name), on_request)?;
-            add_item(&mut plan.items, item);
+            add_item(&mut plan.items, item)?;
         }
         if opts.only_dependencies {
             continue;
@@ -440,28 +440,47 @@ fn build_plan(
             None,
             opts.on_request || opts.reinstall,
         )?;
-        add_item(&mut plan.items, item);
+        add_item(&mut plan.items, item)?;
     }
     Ok(plan)
 }
 
 /// Add `item` to the plan, or merge it into the entry already there.
 ///
-/// The first occurrence fixes the position, which keeps the list in dependency
-/// order. A formula that first appeared as a dependency and is then named on
-/// the command line is promoted to a requested item, so the run does the work
-/// once and the receipt records the request.
-fn add_item(items: &mut Vec<Item>, item: Item) {
-    let Some(existing) = items.iter_mut().find(|i| i.name() == item.name()) else {
-        items.push(item);
-        return;
-    };
-    if item.requested && !existing.requested {
-        existing.requested = true;
-        existing.root = String::new();
-        existing.installed_on_request = true;
-        existing.action = item.action;
+/// Identity is the full name (`tap/name`), not the bare name: two taps can
+/// carry a `jq`, and they are different packages that happen to want the same
+/// rack. The first occurrence fixes the position, which keeps the list in
+/// dependency order. A formula that first appeared as a dependency and is then
+/// named on the command line is promoted to a requested item, so the run does
+/// the work once and the receipt records the request.
+///
+/// One rack cannot hold two packages, so a collision fails the run while
+/// planning, before anything is locked, fetched or written.
+fn add_item(items: &mut Vec<Item>, item: Item) -> Result<()> {
+    let full_name = item.formula.full_name();
+    if let Some(existing) = items
+        .iter_mut()
+        .find(|i| i.formula.full_name() == full_name)
+    {
+        if item.requested && !existing.requested {
+            existing.requested = true;
+            existing.root = String::new();
+            existing.installed_on_request = true;
+            existing.action = item.action;
+        }
+        return Ok(());
     }
+    if let Some(other) = items.iter().find(|i| i.name() == item.name()) {
+        return Err(Error::user(format!(
+            "Formulae with the same name from different taps cannot be installed \
+             at the same time:\n       * {}\n       * {full_name}\n\nInstall them one \
+             at a time, uninstalling the other first:\n  brew uninstall {}",
+            other.formula.full_name(),
+            item.name()
+        )));
+    }
+    items.push(item);
+    Ok(())
 }
 
 fn make_item(
