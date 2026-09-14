@@ -149,6 +149,15 @@ comes from `/System/Library/CoreServices/SystemVersion.plist`
 - Per-platform annotations: `sh.brew.bottle.digest` (sha256 of the blob; must equal the API `bottle_checksum`), `sh.brew.bottle.size`, `sh.brew.bottle.installed_size`, `sh.brew.license`, `sh.brew.path_exec_files`, `sh.brew.sbom.supplement`, `sh.brew.tab` (JSON string; keys `homebrew_version`, `changed_files`, `linkage_files` (optional), `binary_relocation_files` (optional), `padded_prefix` (optional bool), `built_prefix` (optional), `source_modified_time`, `compiler`, `runtime_dependencies`, `arch`, `built_on`).
 - Blob: `GET /v2/homebrew/core/<image>/blobs/sha256:<digest>` with the same Authorization header; follows a redirect to a CDN. Body is a gzip tarball whose entries start with `<name>/<version>/`.
 - `HOMEBREW_GITHUB_PACKAGES_TOKEN`/`_USER` may replace the anonymous token; `HOMEBREW_ARTIFACT_DOMAIN` rewrites the ghcr host.
+- The `Authorization` header goes only to GitHub Packages itself and to a
+  `HOMEBREW_BOTTLE_DOMAIN` the user configured. Homebrew attaches it from
+  `CurlGitHubPackagesDownloadStrategy`, which `DownloadStrategyDetector`
+  selects for `https://ghcr.io/v2/...` alone, so a third-party tap's own
+  `bottle do root_url` downloads through the plain curl strategy with no
+  credentials; fastbrew scopes the header the same way, by the URL before
+  any `HOMEBREW_ARTIFACT_DOMAIN` rewrite. With an artifact domain set the
+  header is sent only when a token is configured, never the anonymous
+  `Bearer QQ==` (`curl_github_packages_download_strategy.rb`).
 
 Cache naming (shared with Homebrew):
 

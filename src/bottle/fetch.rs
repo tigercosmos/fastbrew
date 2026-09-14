@@ -358,7 +358,7 @@ fn request(cfg: &Config, url: &str, accept: Option<&str>) -> Result<reqwest::blo
     let mut req = client
         .get(&request_url)
         .header(reqwest::header::USER_AGENT, user_agent());
-    if let Some(auth) = authorization(cfg) {
+    if let Some(auth) = authorization_for(cfg, url) {
         req = req.header(reqwest::header::AUTHORIZATION, auth);
     }
     if let Some(accept) = accept {
@@ -405,6 +405,42 @@ fn user_agent() -> String {
 
 /// `HOMEBREW_GITHUB_PACKAGES_AUTH` (`brew.sh`): basic auth when a user and a
 /// token are configured, the bare token otherwise, else the anonymous bearer.
+/// The `Authorization` header for one URL, before any artifact-domain rewrite.
+///
+/// Homebrew attaches `HOMEBREW_GITHUB_PACKAGES_AUTH` from
+/// `CurlGitHubPackagesDownloadStrategy`, which `DownloadStrategyDetector` picks
+/// only for `https://ghcr.io/v2/...` (plus the manifest of a user-configured
+/// `HOMEBREW_BOTTLE_DOMAIN`). Everything else — a third-party tap's own
+/// `bottle do root_url`, a mirror named in a formula — downloads with the plain
+/// curl strategy and no credentials, so the registry token never reaches a host
+/// the tap chose.
+fn authorization_for(cfg: &Config, url: &str) -> Option<String> {
+    if !is_credentialed_host(cfg, url) {
+        return None;
+    }
+    authorization(cfg)
+}
+
+/// Whether `url` is one of the hosts registry credentials belong to: GitHub
+/// Packages itself, or the bottle domain the user configured.
+fn is_credentialed_host(cfg: &Config, url: &str) -> bool {
+    let host_matches = |base: &str| -> bool {
+        // Compare scheme and authority, so `https://ghcr.io.evil.test/` and a
+        // path that merely starts with the domain never count.
+        let Some((_, rest)) = base.split_once("://") else {
+            return false;
+        };
+        let host = rest.split('/').next().unwrap_or(rest);
+        ["https://", "http://"]
+            .iter()
+            .any(|scheme| url.starts_with(&format!("{scheme}{host}/")))
+    };
+    if host_matches(&format!("https://{GITHUB_PACKAGES_HOST}")) {
+        return true;
+    }
+    cfg.bottle_domain != crate::config::DEFAULT_BOTTLE_DOMAIN && host_matches(&cfg.bottle_domain)
+}
+
 fn authorization(cfg: &Config) -> Option<String> {
     match (
         cfg.github_packages_user.as_deref(),
@@ -601,6 +637,50 @@ mod tests {
         cfg.github_packages_token = None;
         cfg.artifact_domain = Some("https://mirror.example.com".into());
         assert_eq!(authorization(&cfg), None);
+    }
+
+    #[test]
+    fn credentials_only_reach_github_packages_and_the_configured_domain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::for_test(tmp.path());
+        cfg.github_packages_token = Some("secret".into());
+        let ghcr = "https://ghcr.io/v2/homebrew/core/jq/manifests/1.8.2";
+        assert_eq!(
+            authorization_for(&cfg, ghcr).as_deref(),
+            Some("Bearer secret")
+        );
+
+        // A third-party tap's `root_url` is just another host.
+        for url in [
+            "http://127.0.0.1:8080/v2/review/fixture/jq/blobs/sha256:aa",
+            "https://bottles.example.com/v2/review/fixture/jq/manifests/99.0",
+            // A host that only looks like ghcr.io.
+            "https://ghcr.io.evil.test/v2/homebrew/core/jq/blobs/sha256:aa",
+            // ... and one that only has it in the path.
+            "https://evil.test/ghcr.io/v2/homebrew/core/jq/blobs/sha256:aa",
+        ] {
+            assert_eq!(authorization_for(&cfg, url), None, "{url}");
+        }
+
+        // A bottle domain the user configured does get them, the way
+        // `github_packages_manifest_resource` keeps the strategy for it.
+        cfg.bottle_domain = "https://mirror.example.com/v2/homebrew/core".into();
+        assert_eq!(
+            authorization_for(
+                &cfg,
+                "https://mirror.example.com/v2/homebrew/core/jq/blobs/sha256:aa"
+            )
+            .as_deref(),
+            Some("Bearer secret")
+        );
+        assert_eq!(
+            authorization_for(&cfg, ghcr).as_deref(),
+            Some("Bearer secret")
+        );
+        assert_eq!(
+            authorization_for(&cfg, "https://bottles.example.com/v2/x/y"),
+            None
+        );
     }
 
     #[test]

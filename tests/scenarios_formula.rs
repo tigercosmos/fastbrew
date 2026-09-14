@@ -1456,6 +1456,117 @@ fn a_fixed_cellar_bottle_is_refused_when_the_prefix_is_too_long() {
     assert!(!deep.join("Cellar/diction").exists(), "nothing was poured");
 }
 
+/// A throwaway HTTP server that records the requests it is sent and answers
+/// every one with 404, so a download against it fails quickly.
+struct RecordingServer {
+    port: u16,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RecordingServer {
+    fn start() -> RecordingServer {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+        let port = listener.local_addr().unwrap().port();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&requests);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                sink.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&head).into_owned());
+                let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+        RecordingServer { port, requests }
+    }
+
+    fn recorded(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[test]
+fn a_taps_own_bottle_host_gets_no_registry_credentials() {
+    let sb = sandbox_or_skip!();
+
+    let server = RecordingServer::start();
+    let root_url = format!("http://127.0.0.1:{}/v2/review/fixture", server.port);
+    let remote = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(remote.path().join("Formula")).unwrap();
+    std::fs::write(
+        remote.path().join("Formula/fbauth.rb"),
+        format!(
+            r#"class Fbauth < Formula
+  desc "Tap formula with its own bottle host"
+  homepage "https://example.com/fbauth"
+  url "https://example.com/fbauth-1.0.tar.gz"
+  sha256 "7777777777777777777777777777777777777777777777777777777777777777"
+  license "MIT"
+
+  bottle do
+    root_url "{root_url}"
+    sha256 cellar: :any_skip_relocation, {tag}: "8888888888888888888888888888888888888888888888888888888888888888"
+  end
+end
+"#,
+            tag = support::bottle_tag()
+        ),
+    )
+    .unwrap();
+    git(remote.path(), &["init", "--initial-branch=main", "--quiet"]);
+    git(remote.path(), &["add", "-A"]);
+    git(remote.path(), &["commit", "--quiet", "-m", "Add fbauth"]);
+    ok(
+        &sb,
+        &[
+            "tap",
+            "review/fixture",
+            &format!("file://{}", remote.path().display()),
+        ],
+    );
+
+    // The download fails (the server answers 404); what matters is what was
+    // sent before it did.
+    let out = sb
+        .cmd()
+        .env("HOMEBREW_GITHUB_PACKAGES_TOKEN", "supersecret-token")
+        .env("HOMEBREW_GITHUB_PACKAGES_USER", "someone")
+        .env("HOMEBREW_CURL_RETRIES", "0")
+        .args(["install", "review/fixture/fbauth"])
+        .output()
+        .expect("run fastbrew");
+    let text = combined(&out);
+    assert!(
+        !out.status.success(),
+        "the fake host serves nothing:\n{text}"
+    );
+
+    let requests = server.recorded();
+    assert!(
+        !requests.is_empty(),
+        "the tap's root_url was contacted:\n{text}"
+    );
+    for request in &requests {
+        let lower = request.to_lowercase();
+        assert!(
+            !lower.contains("authorization:"),
+            "a tap's own bottle host must get no credentials:\n{request}"
+        );
+        assert!(!request.contains("supersecret-token"), "{request}");
+        assert!(!request.contains("someone"), "{request}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 9. One rack, one package
 // ---------------------------------------------------------------------------
