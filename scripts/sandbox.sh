@@ -72,6 +72,15 @@ export HOMEBREW_NO_ENV_HINTS=1
 export HOMEBREW_NO_INSTALL_CLEANUP=1
 export FASTBREW_REQUIRE_SANDBOX=1
 export FASTBREW_SANDBOX="$dir"
+# Delegation may only reach a Ruby Homebrew that lives inside the sandbox
+# (scripts/sandbox.sh brew); never the host's /opt/homebrew/bin/brew.
+EOV
+  if [[ -x "$prefix/bin/brew" ]]; then
+    echo "export FASTBREW_BREW=\"$prefix/bin/brew\""
+  else
+    echo "export FASTBREW_NO_DELEGATE=1"
+  fi
+  cat <<EOV
 export PATH="$prefix/bin:$prefix/sbin:\$PATH"
 EOV
 }
