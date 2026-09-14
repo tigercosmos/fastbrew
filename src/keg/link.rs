@@ -128,11 +128,16 @@ pub fn link(
     let mut linker = Linker::new(cfg, keg, overwrite_globs, opts);
     match linker.link_everything() {
         Ok(()) => {
+            // Homebrew counts only the links `link_dir` makes: it extends just
+            // those destinations with `ObserverPathnameExtension`, so neither
+            // the `opt` record nor `var/homebrew/linked/<name>` adds to the
+            // "N symlinks created." total (`Keg#link`, `Keg#link_dir`).
+            let created = linker.created;
             if !opts.dry_run {
                 linker.symlink(&cfg.linked_record(&keg.name), &keg.path)?;
             }
             linker.warn_about_backups();
-            Ok(linker.created)
+            Ok(created)
         }
         Err(e) => {
             if opts.dry_run {
@@ -1214,7 +1219,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(n, 2, "the keg link plus bin/demo");
+        assert_eq!(n, 1, "only bin/demo counts, not the linked-keg record");
         assert!(f.cfg.prefix.join("bin/demo").is_symlink());
     }
 
