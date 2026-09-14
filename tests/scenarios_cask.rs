@@ -1080,6 +1080,92 @@ fn write_app_cask(env: &Env, token: &str, app: &str, extra: &str) {
     env.write_cask(token, &app_cask_rb(token, "1.0", &url, &sha, app, extra));
 }
 
+/// `Cask::Installer#install` keeps the directories an installed cask recorded
+/// (`@cask.config = @cask.default_config.merge(old_config)`): a reinstall
+/// reverses the predecessor out of its own `--appdir` and puts the replacement
+/// back there, rather than leaving the old app behind and installing a second
+/// copy in the default directory. Flags named on the reinstall still win.
+#[test]
+fn reinstall_keeps_the_app_directory_the_cask_was_installed_in() {
+    let env = env_or_skip!();
+    let token = "fastbrew-custom-dir";
+    let app = "FastbrewCustomDir.app";
+    let custom = env.sandbox.home.join("Custom Applications");
+    write_app_cask(&env, token, app, "");
+
+    let out = env.run(&[
+        "install",
+        "--cask",
+        "--appdir",
+        custom.to_str().expect("path"),
+        token,
+    ]);
+    assert!(
+        out.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(custom.join(app).is_dir());
+
+    let config_path = env.caskroom(token).join(".metadata/config.json");
+    let explicit_appdir = |path: &Path| -> String {
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read config.json"))
+                .expect("parse config.json");
+        config["explicit"]["appdir"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(explicit_appdir(&config_path), custom.to_string_lossy());
+
+    // Reinstalling names no directory, so the recorded one still applies.
+    let out = env.run(&["reinstall", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "reinstall failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(custom.join(app).is_dir(), "the app left its app directory");
+    assert!(
+        !env.appdir().join(app).exists(),
+        "a second copy was installed in the default app directory"
+    );
+    assert_eq!(
+        explicit_appdir(&config_path),
+        custom.to_string_lossy(),
+        "the reinstall forgot the recorded app directory"
+    );
+
+    // A directory named on the reinstall wins, and the old copy still goes.
+    let other = env.sandbox.home.join("Other Applications");
+    let out = env.run(&[
+        "reinstall",
+        "--cask",
+        "--appdir",
+        other.to_str().expect("path"),
+        token,
+    ]);
+    assert!(
+        out.status.success(),
+        "reinstall failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        other.join(app).is_dir(),
+        "the new app directory was ignored"
+    );
+    assert!(
+        !custom.join(app).exists(),
+        "the predecessor was left in its old app directory"
+    );
+    assert_eq!(explicit_appdir(&config_path), other.to_string_lossy());
+
+    let out = env.run(&["uninstall", "--cask", token]);
+    assert!(out.status.success());
+    assert!(!other.join(app).exists(), "uninstall missed the app");
+}
+
 /// A dependency's install writes its own Caskroom entry and moves its own
 /// artifacts, so it runs under its own cask lock: the lock the named cask holds
 /// says nothing about the casks it drags in.

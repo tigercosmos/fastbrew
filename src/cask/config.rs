@@ -238,6 +238,46 @@ impl CaskDirs {
         }
     }
 
+    /// `Cask::Config#merge` as `installer.rb` uses it
+    /// (`@cask.config = @cask.default_config.merge(old_config)`): the explicit
+    /// flags an installed cask recorded, with this run's flags on top.
+    ///
+    /// Only the explicit layer carries over; the defaults and
+    /// `HOMEBREW_CASK_OPTS` are re-read, exactly as `Config.new(explicit:)`
+    /// does. The result is a flag list so the merged layer is what
+    /// [`CaskDirs::resolve`] resolves and [`CaskDirs::to_config_json`] records,
+    /// which keeps the directories stable across the next reinstall.
+    pub fn merged_explicit_flags(config_path: &Path, explicit_flags: &[String]) -> Vec<String> {
+        let saved = std::fs::read_to_string(config_path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+        let Some(explicit) = saved
+            .as_ref()
+            .and_then(|v| v.get("explicit"))
+            .and_then(Value::as_object)
+        else {
+            return explicit_flags.to_vec();
+        };
+        // `Config.from_args` builds the explicit hash in `DEFAULT_DIRS` order.
+        let mut flags: Vec<String> = DEFAULT_DIRS
+            .iter()
+            .filter_map(|(key, _)| {
+                let value = explicit.get(*key)?.as_str()?;
+                Some(format!("--{}={value}", key.replace('_', "-")))
+            })
+            .collect();
+        if let Some(languages) = explicit.get("languages").and_then(Value::as_array) {
+            let list: Vec<&str> = languages.iter().filter_map(Value::as_str).collect();
+            if !list.is_empty() {
+                flags.push(format!("--language={}", list.join(",")));
+            }
+        }
+        // `parse_dir_flags` lets the last occurrence of a key win, so this run's
+        // flags override what the predecessor recorded.
+        flags.extend(explicit_flags.iter().cloned());
+        flags
+    }
+
     /// Target directory for a moved artifact kind (`Relocated.dirmethod`).
     pub fn dir_for_kind(&self, kind: &str) -> Option<&Path> {
         let path = match kind {

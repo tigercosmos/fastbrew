@@ -327,7 +327,7 @@ pub fn install_cask_entry(
     match &installed {
         // `reinstall` and `--force` over an installed version replace it
         // through the same backup/restore dance an upgrade uses.
-        Some(installed) => replace_installed(cfg, index, dirs, cask, installed, opts, &download),
+        Some(installed) => replace_installed(cfg, index, cask, installed, opts, &download),
         None => install_download(cfg, index, dirs, cask, opts, &download, false),
     }
 }
@@ -501,7 +501,7 @@ fn upgrade_installed(
     // download leaves the installed one running.
     let download = super::download::download_cask(cfg, cask, opts.quiet)?;
     install_dependencies(cfg, index, dirs, cask, &opts)?;
-    replace_installed(cfg, index, dirs, cask, installed, &opts, &download)
+    replace_installed(cfg, index, cask, installed, &opts, &download)
 }
 
 /// Replace `installed` with a fetched `cask`, in `Cask::Upgrade.upgrade_cask`'s
@@ -509,16 +509,30 @@ fn upgrade_installed(
 /// rename that directory and its metadata aside (`Installer#backup`), install
 /// the new version and only then purge the backup. Any failure puts the
 /// predecessor back (`Installer#restore_backup`, `#revert_upgrade`).
+///
+/// The predecessor's artifacts live where its own `.metadata/config.json` says,
+/// which is not where the defaults of this run point: a cask installed with
+/// `--appdir` has to be reversed out of that directory, not left behind while a
+/// second copy appears somewhere else. The replacement keeps those directories
+/// too, with this run's flags on top
+/// (`installer.rb`: `@cask.config = @cask.default_config.merge(old_config)`).
 fn replace_installed(
     cfg: &Config,
     index: Option<&Index>,
-    dirs: &CaskDirs,
     cask: &CaskEntry,
     installed: &InstalledCask,
     opts: &CaskInstallOptions,
     download: &Path,
 ) -> Result<()> {
-    let predecessor_specs = installed_specs(cfg, dirs, installed, Some(cask));
+    let config_path = installed.config_path();
+    let predecessor_dirs = CaskDirs::read_or_resolve(cfg, &config_path, &opts.explicit_dir_flags);
+    let mut opts = opts.clone();
+    opts.explicit_dir_flags =
+        CaskDirs::merged_explicit_flags(&config_path, &opts.explicit_dir_flags);
+    let opts = &opts;
+    let dirs = &CaskDirs::resolve(cfg, &opts.explicit_dir_flags);
+
+    let predecessor_specs = installed_specs(cfg, &predecessor_dirs, installed, Some(cask));
     let predecessor_ctx = installed_context(installed);
     let predecessor_opts = ArtifactOptions {
         force: true,
@@ -533,7 +547,7 @@ fn replace_installed(
     let outcome = (|| -> Result<()> {
         artifacts::uninstall_specs(
             cfg,
-            dirs,
+            &predecessor_dirs,
             &predecessor_specs,
             &predecessor_ctx,
             opts.zap,
@@ -566,7 +580,7 @@ fn replace_installed(
             }
             if let Err(rollback) = artifacts::install_specs(
                 cfg,
-                dirs,
+                &predecessor_dirs,
                 &predecessor_specs,
                 &predecessor_ctx,
                 predecessor_opts,
