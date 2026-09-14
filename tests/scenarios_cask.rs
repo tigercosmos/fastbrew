@@ -2287,6 +2287,65 @@ fn latest_casks_need_greedy_latest_and_a_changed_download() {
     let _ = env.run(&["uninstall", "--cask", token]);
 }
 
+/// Removing a staged version is as destructive as `uninstall --cask`, so
+/// `cleanup` takes the cask lock first and reports the cask it has to skip.
+/// The `<version>.upgrading` copy an interrupted upgrade rolls back to is the
+/// only surviving copy of the working app, so it is never a stale version.
+#[test]
+fn cask_cleanup_takes_the_lock_and_keeps_upgrade_backups() {
+    let env = env_or_skip!();
+    let token = "fastbrew-cleanup-lock";
+    let app = "FastbrewCleanupLock.app";
+    env.install_app_cask(token, app, "1.0", "");
+    let caskroom = env.caskroom(token);
+
+    // What an interrupted upgrade leaves behind: the predecessor moved aside
+    // by `Installer#backup`, next to a staged version that really is gone.
+    let backup = caskroom.join("0.9.upgrading");
+    std::fs::create_dir_all(&backup).expect("mkdir the backup");
+    std::fs::write(backup.join("only-working-copy"), "previous app").expect("write the backup");
+    let stale = caskroom.join("0.8");
+    std::fs::create_dir_all(&stale).expect("mkdir the stale version");
+    std::fs::write(stale.join("staged"), "a version that is gone")
+        .expect("write the stale version");
+
+    // Another process is working on this cask: nothing in the Caskroom moves.
+    let held = fastbrew::keg::lock::lock_cask(&env.config(), token).expect("take the cask lock");
+    let report = env.combined(&["cleanup", token]);
+    assert!(
+        report.contains(&format!(
+            "A `brew` process has already locked {}",
+            caskroom.display()
+        )),
+        "a locked cask has to be reported and skipped:\n{report}"
+    );
+    assert!(
+        backup.join("only-working-copy").is_file(),
+        "the rollback copy was deleted under a held lock:\n{report}"
+    );
+    assert!(
+        stale.join("staged").is_file(),
+        "a locked cask's staged versions were swept:\n{report}"
+    );
+    drop(held);
+
+    // Unlocked, the stale version goes and the rollback copy stays.
+    let report = env.combined(&["cleanup", token]);
+    assert!(
+        !stale.exists(),
+        "the stale version survived an unlocked cleanup:\n{report}"
+    );
+    assert!(
+        backup.join("only-working-copy").is_file(),
+        "`.upgrading` is a backup, not a stale version:\n{report}"
+    );
+    assert!(
+        caskroom.join("1.0").is_dir(),
+        "the installed version was swept:\n{report}"
+    );
+    assert!(env.appdir().join(app).is_dir(), "the app was removed");
+}
+
 /// `pin`/`unpin` work on casks in Homebrew 6 (`Cask#pin`): a relative symlink
 /// under `var/homebrew/pinned_casks`.
 #[test]

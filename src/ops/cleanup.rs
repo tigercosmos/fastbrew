@@ -411,26 +411,33 @@ fn stale_download(sweeper: &Sweeper<'_>, index: &Index, path: &Path) -> bool {
 
 /// `Cleanup#cleanup_cask`: drop cached downloads that are not the current
 /// version, and stage directories of versions that are gone.
+///
+/// Removing a staged version is as destructive as `uninstall --cask`, so it
+/// happens under the cask lock (`Cask::Cask#lock`), exactly like
+/// [`cleanup_formula`]. A cask another process is installing, upgrading or
+/// removing is reported and skipped, and only its cache entries are swept.
+/// `<version>.upgrading` is the rollback copy an in-flight upgrade depends on
+/// (`Cask::Installer#backup_path`), never a leftover of a version that is gone.
 fn cleanup_cask(sweeper: &mut Sweeper<'_>, index: &Index, token: &str) {
     let cfg = sweeper.cfg;
     let current = index.cask(token).and_then(|c| c.version);
     if let Some(installed) = cask::installed_cask(cfg, token) {
         let caskroom = installed.caskroom_path.clone();
-        if let Ok(entries) = std::fs::read_dir(&caskroom) {
-            let mut stale: Vec<PathBuf> = entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .filter(|p| {
-                    let name = p
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    !name.starts_with('.') && name != installed.version
-                })
-                .collect();
-            stale.sort();
+        let stale = stale_version_dirs(&caskroom, &installed.version);
+        if !stale.is_empty() && !sweeper.opts.dry_run {
+            // A dry run removes nothing, so it needs no lock.
+            match keg::lock::lock_cask(cfg, &installed.token) {
+                Ok(lock) => {
+                    // Another process may have finished a version while the
+                    // lock was being taken; re-read under it.
+                    for path in stale_version_dirs(&caskroom, &installed.version) {
+                        sweeper.remove(&path.clone(), || std::fs::remove_dir_all(&path));
+                    }
+                    drop(lock);
+                }
+                Err(e) => output::opoo(&e.to_string()),
+            }
+        } else {
             for path in stale {
                 sweeper.remove(&path.clone(), || std::fs::remove_dir_all(&path));
             }
@@ -460,6 +467,33 @@ fn cleanup_cask(sweeper: &mut Sweeper<'_>, index: &Index, token: &str) {
             remove_with_link(sweeper, &path);
         }
     }
+}
+
+/// Staged directories in `caskroom` that belong to no installed version.
+///
+/// Dot directories (`.metadata`) and the `<version>.upgrading` backups an
+/// in-flight upgrade rolls back to are not stale versions.
+fn stale_version_dirs(caskroom: &Path, installed_version: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(caskroom) else {
+        return vec![];
+    };
+    let mut stale: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter(|p| {
+            let name = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            !name.starts_with('.')
+                && name != installed_version
+                && !name.ends_with(cask::BACKUP_SUFFIX)
+        })
+        .collect();
+    stale.sort();
+    stale
 }
 
 /// Remove a cache entry: symlinks in `$CACHE` point at the real file in
