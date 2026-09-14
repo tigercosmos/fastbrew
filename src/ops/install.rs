@@ -51,13 +51,15 @@ pub struct Mode {
     pub upgrade: bool,
 }
 
-/// `Utils.pluralize`, for the handful of stems the install path uses.
+/// `Utils.pluralize(stem, count, include_count: true)`, for the stems the
+/// install path uses: `formula` takes `-e`, `dependency` becomes `dependencies`.
 pub fn pluralize(stem: &str, count: usize) -> String {
-    let suffix = match (stem, count) {
-        (_, 1) => "",
-        ("formula", _) => "e",
-        _ => "s",
+    let (stem, singular, plural) = match stem {
+        "formula" => ("formula", "", "e"),
+        "dependency" => ("dependenc", "y", "ies"),
+        other => (other, "", "s"),
     };
+    let suffix = if count == 1 { singular } else { plural };
     format!("{count} {stem}{suffix}")
 }
 
@@ -95,25 +97,7 @@ pub fn install_formulae_with(
     }
 
     if opts.dry_run {
-        let verb = if opts.reinstall {
-            "reinstall"
-        } else if mode.upgrade {
-            "upgrade"
-        } else {
-            "install"
-        };
-        output::ohai(&format!(
-            "Would {verb} {}:",
-            pluralize("formula", plan.items.len())
-        ));
-        println!(
-            "{}",
-            plan.items
-                .iter()
-                .map(|i| i.name().to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
+        print_dry_run(cfg, &plan, opts, mode);
         return Ok(());
     }
 
@@ -209,6 +193,69 @@ pub fn install_formulae_with(
         Ok(())
     } else {
         Err(Error::user(blocks.join("\n")))
+    }
+}
+
+/// `Homebrew::Install.install_formulae`'s `--dry-run` branch: the requested
+/// formulae on one line, then one block per formula for its dependencies,
+/// split into the ones that would be installed and the ones upgraded.
+fn print_dry_run(cfg: &Config, plan: &Plan, opts: &InstallOptions, mode: Mode) {
+    let verb = if opts.reinstall {
+        "reinstall"
+    } else if mode.upgrade {
+        "upgrade"
+    } else {
+        "install"
+    };
+    let requested: Vec<String> = plan
+        .items
+        .iter()
+        .filter(|i| i.requested)
+        .map(|i| i.name().to_string())
+        .collect();
+    if !requested.is_empty() {
+        output::ohai(&format!(
+            "Would {verb} {}:",
+            pluralize("formula", requested.len())
+        ));
+        println!("{}", requested.join(" "));
+    }
+
+    for root in &plan.roots {
+        let deps: Vec<&Item> = plan
+            .items
+            .iter()
+            .filter(|i| !i.requested && i.root == *root)
+            .collect();
+        if deps.is_empty() {
+            continue;
+        }
+        for (verb, wanted) in [("install", Action::Install), ("upgrade", Action::Upgrade)] {
+            let group: Vec<String> = deps
+                .iter()
+                .filter(|i| i.action == wanted)
+                .map(|i| dry_run_description(cfg, i))
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            output::ohai(&format!(
+                "Would {verb} {} for {root}:",
+                pluralize("dependency", group.len())
+            ));
+            println!("{}", crate::ops::upgrade::format_upgrade_summary(&group));
+        }
+    }
+}
+
+/// `Upgrade.upgrade_formula`'s dry-run label: `name old -> new` for something
+/// already installed, `name version` otherwise.
+fn dry_run_description(cfg: &Config, item: &Item) -> String {
+    let name = item.formula.full_name();
+    let new = item.pkg_version();
+    match keg::latest_keg(cfg, item.name()).map(|k| k.version.to_string()) {
+        Some(current) if current != new => format!("{name} {current} -> {new}"),
+        _ => format!("{name} {new}"),
     }
 }
 
@@ -785,6 +832,9 @@ mod tests {
     fn pluralizes_like_homebrew() {
         assert_eq!(pluralize("formula", 1), "1 formula");
         assert_eq!(pluralize("formula", 3), "3 formulae");
+        assert_eq!(pluralize("dependency", 1), "1 dependency");
+        assert_eq!(pluralize("dependency", 2), "2 dependencies");
+        assert_eq!(pluralize("package", 1), "1 package");
         assert_eq!(pluralize("package", 2), "2 packages");
     }
 
