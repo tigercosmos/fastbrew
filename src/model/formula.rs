@@ -50,6 +50,9 @@ pub struct FormulaEntry {
     pub service_args: Vec<Value>,
     pub service_run_args: Vec<Value>,
     pub service_run_kwargs: Option<Value>,
+    /// Wire form is a single object (`{":macos": "label"}`), not an array;
+    /// it is normalized to a one-element vector.
+    #[serde(deserialize_with = "one_or_many")]
     pub service_name_args: Vec<Value>,
     pub keg_only_args: Vec<Value>,
     pub aliases: Vec<String>,
@@ -298,6 +301,21 @@ fn parse_deprecate(v: &Value) -> Option<DeprecateDisable> {
         replacement_formula: get(":replacement_formula"),
         replacement_cask: get(":replacement_cask"),
     })
+}
+
+/// Accept either a JSON array or a single value, normalizing to a vector.
+///
+/// The internal API writes `service_name_args` as a bare object even though
+/// every sibling `*_args` key is an array (`docs/COMPAT.md` 1.3).
+fn one_or_many<'de, D>(d: D) -> std::result::Result<Vec<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Value::deserialize(d)? {
+        Value::Null => Ok(vec![]),
+        Value::Array(a) => Ok(a),
+        other => Ok(vec![other]),
+    }
 }
 
 fn parse_tag(s: &str) -> Option<DependencyTag> {

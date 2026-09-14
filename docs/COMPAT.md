@@ -104,7 +104,7 @@ deprecate_args 495: {":date": "YYYY-MM-DD", ":because": ":deprecated_upstream"|"
 disable_args 489 (same shape),
 service_args 360: [ [":run_type", ":immediate"|":interval"|":cron"], [":working_dir", ".."], [":log_path", ".."], [":error_log_path", ".."], [":keep_alive", true|{":always": true}|{":successful_exit": bool}|{":crashed": bool}|{":path": ".."}], [":interval", n], [":cron", "..."], [":environment_variables", {..}], [":process_type", ":background"|..], [":require_root", bool], [":launch_only_once", bool], [":restart_delay", n], [":root_dir", ..], [":input_path", ..], [":macos_legacy_timers", bool], [":sockets", ..] ],
 service_run_args 357: [ ["cmd", "arg", ...] ] or [ [{":macos": ["cmd", ...], ":linux": ["cmd", ...]}] ],
-service_run_kwargs 3, service_name_args 3: [ {":macos": "custom.label", ":linux": "unit"} ],
+service_run_kwargs 3, service_name_args 3: {":macos": "custom.label", ":linux": "unit"} (a bare object, unlike every other `*_args` key, which are arrays),
 keg_only_args 251: [":provided_by_macos"|":shadowed_by_macos"|":versioned_formula"|"free text reason", "optional explanation"],
 aliases 249, versioned_formulae 218, oldnames 173,
 post_install_steps 162 (see DESIGN.md section 7 and Library/Homebrew/install_steps.rb),

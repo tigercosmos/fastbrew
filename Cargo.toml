@@ -20,7 +20,7 @@ anyhow = "1"
 thiserror = "2"
 clap = { version = "4", features = ["derive", "wrap_help", "env"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 memmap2 = "0.9"
 rkyv = { version = "0.8", features = ["std", "bytecheck"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip", "json", "stream"] }
