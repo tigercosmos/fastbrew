@@ -55,6 +55,7 @@ impl CaskInstallOptions {
         DownloadOptions {
             quiet: self.quiet,
             no_quarantine: self.no_quarantine,
+            refresh: false,
         }
     }
 
@@ -1311,6 +1312,12 @@ pub fn is_outdated(
 /// with `LATEST_DOWNLOAD_SHA256`, recorded when the cask was installed. A
 /// missing record, or a download that cannot be checksummed, counts as
 /// outdated exactly as `checksumable?` returning false does.
+///
+/// `Cask#new_download_sha` downloads with `verify_download_integrity: false`,
+/// which for a `:latest` cask means asking the server rather than trusting the
+/// cache: the container it carries is the only thing that can have changed, so
+/// a cached copy always answers "not outdated" and the cask can never be
+/// upgraded again.
 fn outdated_download_sha(cfg: &Config, cask: &CaskEntry, installed: &InstalledCask) -> bool {
     let recorded = std::fs::read_to_string(installed.download_sha_path())
         .map(|s| s.trim().to_string())
@@ -1326,6 +1333,7 @@ fn outdated_download_sha(cfg: &Config, cask: &CaskEntry, installed: &InstalledCa
             // A check never changes what is installed, so it never needs to
             // touch the download's quarantine metadata either.
             no_quarantine: true,
+            refresh: true,
         },
     )
     .and_then(|path| super::download::file_sha256(&path))

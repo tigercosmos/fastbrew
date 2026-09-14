@@ -1212,6 +1212,94 @@ fn a_fresh_download_and_the_app_it_stages_are_quarantined() {
     let _ = env.run(&["uninstall", "--cask", token, plain]);
 }
 
+/// A `version :latest` cask with no checksum, whose container may change under
+/// the same url.
+fn latest_cask_rb(token: &str, url: &str, app: &str) -> String {
+    format!(
+        r#"cask "{token}" do
+  version :latest
+  sha256 :no_check
+
+  url "{url}"
+  name "{token} fixture"
+  desc "Fixture cask for the scenario tests"
+  homepage "https://example.invalid/{token}"
+
+  app "{app}"
+end
+"#
+    )
+}
+
+/// `Cask#outdated_download_sha?` is the only outdated check a `version :latest`
+/// cask has, and a cached container always matches the checksum the install
+/// recorded. The check therefore has to ask the server (`Cask#new_download_sha`
+/// downloads again), or such a cask can never be upgraded once it is installed.
+#[test]
+fn a_latest_cask_revalidates_its_download_against_the_server() {
+    let env = env_or_skip!();
+    let token = "fastbrew-latest-refresh";
+    let app = "FastbrewLatestRefresh.app";
+    let (payload, first_sha) = build_fixture_zip(&env, app, "1.0");
+    let server = FileServer::start(payload);
+    let url = server.url("latest.zip");
+    env.write_cask(token, &latest_cask_rb(token, &url, app));
+
+    let out = env.run(&["install", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let installed = env.appdir().join(app);
+    assert_eq!(app_version(&installed), "1.0");
+    let recorded = env.caskroom(token).join(".metadata/LATEST_DOWNLOAD_SHA256");
+    assert_eq!(
+        std::fs::read_to_string(&recorded)
+            .expect("LATEST_DOWNLOAD_SHA256")
+            .trim(),
+        first_sha
+    );
+    let after_install = server.requests().len();
+
+    // The container has not changed, but the check still has to ask.
+    let report = env.combined(&["upgrade", "--cask", token]);
+    assert!(
+        report.contains(&format!(
+            "Not upgrading {token}, the downloaded artifact has not changed"
+        )),
+        "{report}"
+    );
+    assert!(
+        server.requests().len() > after_install,
+        "the outdated check answered from the cache without asking the server"
+    );
+    assert_eq!(app_version(&installed), "1.0");
+
+    // A new container under the same url is a new "version" of a `:latest` cask.
+    let (payload, second_sha) = build_fixture_zip(&env, app, "2.0");
+    assert_ne!(first_sha, second_sha);
+    server.serve(payload);
+    let out = env.run(&["upgrade", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "upgrade failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        app_version(&installed),
+        "2.0",
+        "the changed container was not installed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&recorded)
+            .expect("LATEST_DOWNLOAD_SHA256")
+            .trim(),
+        second_sha
+    );
+    let _ = env.run(&["uninstall", "--cask", token]);
+}
+
 /// Write a fixture cask whose container is seeded, with `extra` stanzas.
 fn write_app_cask(env: &Env, token: &str, app: &str, extra: &str) {
     let url = fixture_url(token, "1.0");

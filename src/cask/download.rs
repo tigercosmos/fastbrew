@@ -336,6 +336,10 @@ pub struct DownloadOptions {
     /// `Quarantine.cask!` on the download, so nothing is propagated onto the
     /// staged files either.
     pub no_quarantine: bool,
+    /// Revalidate a cached download against the server instead of trusting it.
+    /// A `version :latest` cask has no version to compare, so this is the only
+    /// way to see that its container changed (`Cask#new_download_sha`).
+    pub refresh: bool,
 }
 
 /// Download the cask's `url`, verify its checksum and return the cached path.
@@ -346,7 +350,11 @@ pub fn download_cask(cfg: &Config, cask: &CaskEntry, opts: DownloadOptions) -> R
     let kwargs = UrlKwargs::from_value(cask.url_kwargs.as_ref());
     let version = cask.version.as_deref().unwrap_or("latest");
 
-    let path = fetch(cfg, url, &kwargs, opts.quiet)?;
+    let path = if opts.refresh {
+        refetch(cfg, url, &kwargs, opts.quiet)?
+    } else {
+        fetch(cfg, url, &kwargs, opts.quiet)?
+    };
 
     // Symlink under `$CACHE/Cask` so `brew` and fastbrew share the download.
     let link = symlink_location(cfg, &cask.token, version, url);
@@ -398,15 +406,47 @@ pub fn file_sha256(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// RFC 7231 `IMF-fixdate`, the only format `If-Modified-Since` may carry.
+fn http_date(time: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(time)
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string()
+}
+
 /// Fetch `url` into the shared download cache, reusing a complete download.
 pub fn fetch(cfg: &Config, url: &str, kwargs: &UrlKwargs, quiet: bool) -> Result<PathBuf> {
+    fetch_with(cfg, url, kwargs, quiet, false)
+}
+
+/// Fetch `url`, revalidating a cached download against the server instead of
+/// trusting it (`curl --time-cond <cached file>`).
+///
+/// This is what a `version :latest` cask needs: it carries no version to
+/// compare, so the only way to notice that the container changed is to ask the
+/// server. The cached file stays in place until a complete replacement has
+/// arrived, and a server that cannot be reached leaves it alone, so a check
+/// offline still answers from what is already there.
+pub fn refetch(cfg: &Config, url: &str, kwargs: &UrlKwargs, quiet: bool) -> Result<PathBuf> {
+    fetch_with(cfg, url, kwargs, quiet, true)
+}
+
+fn fetch_with(
+    cfg: &Config,
+    url: &str,
+    kwargs: &UrlKwargs,
+    quiet: bool,
+    revalidate: bool,
+) -> Result<PathBuf> {
     if !quiet {
         output::ohai(&format!("Downloading {url}"));
     }
 
     let guessed = parse_basename(url, true);
     let cached = cached_location(cfg, url, &guessed);
-    if cached.exists() {
+    let cached_mtime = std::fs::metadata(&cached)
+        .ok()
+        .and_then(|m| m.modified().ok());
+    if cached.exists() && !revalidate {
         if !quiet {
             println!("Already downloaded: {}", cached.display());
         }
@@ -450,11 +490,46 @@ pub fn fetch(cfg: &Config, url: &str, kwargs: &UrlKwargs, quiet: bool) -> Result
     if !kwargs.data.is_empty() {
         request = request.form(&kwargs.data);
     }
+    // `curl --time-cond <cached file>`: ask the server to answer 304 when the
+    // container has not changed since the copy already in the cache.
+    if let Some(mtime) = cached_mtime.filter(|_| revalidate) {
+        request = request.header(reqwest::header::IF_MODIFIED_SINCE, http_date(mtime));
+    }
 
-    let mut response = request
-        .send()
-        .map_err(|e| Error::user(format!("Failed to download resource \"{url}\"\n{e}")))?;
+    let mut response = match request.send() {
+        Ok(response) => response,
+        // A revalidation that cannot reach the server answers from the cache:
+        // failing here would turn an outdated check into an error.
+        Err(e) if cached.exists() => {
+            if !quiet {
+                output::opoo(&format!(
+                    "Failed to check \"{url}\" for a newer download, using the cached one.\n{e}"
+                ));
+            }
+            return Ok(cached);
+        }
+        Err(e) => {
+            return Err(Error::user(format!(
+                "Failed to download resource \"{url}\"\n{e}"
+            )));
+        }
+    };
+    if revalidate && cached.exists() && response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        if !quiet {
+            println!("Already downloaded: {}", cached.display());
+        }
+        return Ok(cached);
+    }
     if !response.status().is_success() {
+        if revalidate && cached.exists() {
+            if !quiet {
+                output::opoo(&format!(
+                    "Failed to check \"{url}\" for a newer download, using the cached one.\nDownload failed: {}",
+                    response.status()
+                ));
+            }
+            return Ok(cached);
+        }
         return Err(Error::user(format!(
             "Failed to download resource \"{url}\"\nDownload failed: {}",
             response.status()

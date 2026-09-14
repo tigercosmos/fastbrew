@@ -403,6 +403,17 @@ names), then `macos`, then `maximum_macos`, each as
 `MacOSRequirement#display_s` spells it (`macOS >= 13`, `macOS == 13 / 14`, or
 a bare `macOS` when no version is given).
 
+A `version :latest` cask carries no version to compare, so
+`Cask#outdated_download_sha?` compares the container's sha256 with
+`.metadata/LATEST_DOWNLOAD_SHA256`, written at install time. The container is
+the only thing that can have changed, so `Cask#new_download_sha` downloads it
+again rather than trusting the cache: fastbrew revalidates with a conditional
+`GET` (`If-Modified-Since` from the cached file's mtime, like `curl
+--time-cond`), keeps the cached file until a complete replacement has arrived,
+and falls back to the cached copy when the server cannot be reached or answers
+`304`. A missing record counts as outdated. This check only runs for a cask
+named on the command line or under `--greedy`/`--greedy-latest`.
+
 Pinning a cask (`brew pin --cask`, Homebrew 6) is a relative symlink
 `$PREFIX/var/homebrew/pinned_casks/<token>` -> `Caskroom/<token>/<version>`
 (`Cask#pin`). `pinned?` needs it to resolve, `pinned_version` is the basename
