@@ -168,19 +168,19 @@ pub fn is_pinned(cfg: &Config, name: &str) -> bool {
     cfg.pinned_record(name).is_symlink()
 }
 
-/// Human readable size like Homebrew's `disk_usage_readable` (`1.2MB`, `186KB`, `8B`).
+/// Human readable size like Homebrew's `disk_usage_readable` (`1.2MB`,
+/// `186KB`, `64.9MB`, `8B`): one decimal place unless it would be a trailing
+/// zero (`Formatter.disk_usage_readable` in `utils/formatter.rb`).
 pub fn disk_usage_readable(bytes: u64) -> String {
-    let units = ["B", "KB", "MB", "GB", "TB"];
+    let units = ["B", "KB", "MB", "GB"];
     let mut value = bytes as f64;
     let mut unit = 0;
     while value >= 1000.0 && unit < units.len() - 1 {
         value /= 1000.0;
         unit += 1;
     }
-    if unit == 0 {
-        format!("{bytes}B")
-    } else if value >= 10.0 {
-        format!("{value:.0}{}", units[unit])
+    if ((value * 10.0) as i64) % 10 == 0 {
+        format!("{}{}", value as i64, units[unit])
     } else {
         format!("{value:.1}{}", units[unit])
     }

@@ -189,7 +189,7 @@ fn request(
         .map_err(|e| e.to_string())?;
 
     let mut last_error = String::new();
-    for attempt in 0..=retries.max(0) {
+    for attempt in 0..=retries {
         let mut req = client.get(url);
         if let Some(t) = if_modified_since {
             req = req.header(reqwest::header::IF_MODIFIED_SINCE, http_date(t));

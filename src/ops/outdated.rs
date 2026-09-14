@@ -172,10 +172,13 @@ pub fn outdated_casks(
             if !greedy {
                 continue;
             }
-        } else if installed_version == current {
-            continue;
-        } else if index.cask_auto_updates_at(i) && !greedy {
-            continue;
+        } else {
+            // An `auto_updates` cask updates itself, so it is only reported
+            // with `--greedy`.
+            let same = installed_version == current;
+            if same || (index.cask_auto_updates_at(i) && !greedy) {
+                continue;
+            }
         }
         out.push(OutdatedCask {
             token,
