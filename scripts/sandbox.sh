@@ -57,10 +57,6 @@ export HOMEBREW_CACHE="$cache"
 export HOMEBREW_LOGS="$dir/logs"
 export HOMEBREW_TEMP="$dir/tmp"
 export HOME="$home"
-# The sandbox HOME hides the real toolchain, so keep rustup and cargo pointed
-# at the invoking user's directories.
-export RUSTUP_HOME="\${RUSTUP_HOME:-$HOME/.rustup}"
-export CARGO_HOME="\${CARGO_HOME:-$HOME/.cargo}"
 export HOMEBREW_CASK_OPTS="--appdir=$home/Applications --fontdir=$home/Library/Fonts"
 export HOMEBREW_NO_AUTO_UPDATE=1
 export HOMEBREW_NO_ANALYTICS=1
