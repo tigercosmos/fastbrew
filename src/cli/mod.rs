@@ -111,12 +111,31 @@ where
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
 
     let argv: Vec<OsString> = args.into_iter().collect();
-    match dispatch(argv) {
+    match dispatch(argv.clone()) {
         Ok(code) => code,
-        Err(Error::NeedsDelegation { reason }) => {
-            output::onoe(&reason);
+        Err(Error::NeedsDelegation { reason }) => delegate_or_fail(&argv, &reason),
+        Err(e) => {
+            output::onoe(&e.to_string());
             1
         }
+    }
+}
+
+/// A command handler decided the Ruby `brew` must take over (source build,
+/// no bottle, Ruby-only tap formula...): `exec` it with the original
+/// arguments, or explain why that is impossible.
+fn delegate_or_fail(argv: &[OsString], reason: &str) -> i32 {
+    let quiet = argv.iter().any(|a| a == "-q" || a == "--quiet");
+    let cfg = match Config::from_env() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            output::onoe(&e.to_string());
+            return 1;
+        }
+    };
+    let args: Vec<OsString> = argv.iter().skip(1).cloned().collect();
+    match crate::delegate::exec_brew(&cfg, &args, reason, quiet) {
+        Ok(never) => match never {},
         Err(e) => {
             output::onoe(&e.to_string());
             1
