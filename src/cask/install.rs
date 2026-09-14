@@ -255,7 +255,9 @@ pub fn install_cask_entry(
         api_path: Some(api_file_path(cfg)),
         runtime_dependencies: runtime_dependencies(cask),
     };
-    metadata::write_caskfile(&input, None)?;
+    // `save_caskfile` drops the timestamp directory the previous install left.
+    let previous_metadata = super::installed_cask(cfg, &cask.token).and_then(|c| c.metadata_path);
+    metadata::write_caskfile(&input, previous_metadata.as_deref())?;
 
     if let Err(error) = artifacts::install_specs(cfg, dirs, &specs, &ctx, opts.artifact_options()) {
         purge_versioned_files(cfg, cask, &ctx, opts.upgrade);

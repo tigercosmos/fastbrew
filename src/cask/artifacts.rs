@@ -435,7 +435,9 @@ pub fn install_specs(
 ) -> Result<()> {
     let mut installed: Vec<&ArtifactSpec> = Vec::new();
     for spec in specs {
-        if spec.kind == "binary" && opts.skip_binaries {
+        // `--no-binaries` skips `Artifact::Binary`, and `command_wrapper`
+        // subclasses it.
+        if matches!(spec.kind.as_str(), "binary" | "command_wrapper") && opts.skip_binaries {
             continue;
         }
         if let Err(error) = install_one(cfg, dirs, spec, ctx, opts) {
