@@ -244,6 +244,11 @@ pub fn print_formula_info(ctx: &Ctx, formula: &FormulaEntry) -> Result<()> {
 
     if installed {
         println!("Installed");
+        // `--verbose` adds the section header above the keg list
+        // (`docs/COMPAT.md` 9).
+        if ctx.verbose {
+            output::ohai("Installed Versions");
+        }
         for k in &kegs {
             let (files, bytes) = k.disk_usage();
             let star = if k.is_linked(cfg) || k.is_optlinked(cfg) {
