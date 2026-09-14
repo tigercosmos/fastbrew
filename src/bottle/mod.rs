@@ -7,7 +7,38 @@ pub mod fetch;
 pub mod macho;
 pub mod relocate;
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
+
+/// Run `f` with `path` temporarily user-writable, restoring its mode
+/// afterwards (`Utils::Path.ensure_writable`). Bottled files are commonly
+/// `r-xr-xr-x`, and relocation, signing and text replacement all rewrite them
+/// in place.
+pub fn with_writable<T>(
+    path: &Path,
+    f: impl FnOnce() -> crate::error::Result<T>,
+) -> crate::error::Result<T> {
+    use std::os::unix::fs::PermissionsExt;
+    let original = std::fs::symlink_metadata(path)
+        .ok()
+        .map(|m| m.permissions());
+    let restore = match &original {
+        Some(p) if p.mode() & 0o200 == 0 => {
+            let mut relaxed = p.clone();
+            relaxed.set_mode(p.mode() | 0o200);
+            std::fs::set_permissions(path, relaxed)
+                .ok()
+                .map(|()| p.clone())
+        }
+        _ => None,
+    };
+    let result = f();
+    if let Some(mode) = restore {
+        let _ = std::fs::set_permissions(path, mode);
+    }
+    result
+}
 
 /// The `sh.brew.tab` annotation of a bottle manifest.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
