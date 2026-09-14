@@ -88,12 +88,20 @@ developer commands) are passed to the real `brew` automatically. To remove
 fastbrew, delete the binary; it keeps no state outside Homebrew's cache
 directory (`~/Library/Caches/Homebrew/fastbrew`).
 
-### Building
+### Building and installing from a checkout
 
 ```sh
-cargo build --release
-target/release/fastbrew --version
+git clone https://github.com/tigercosmos/fastbrew.git
+cd fastbrew
+make build       # release build into target/release/fastbrew
+make install     # copies it into the first writable bin directory on your PATH
 ```
+
+`make install` picks `~/.cargo/bin`, `~/.local/bin`, `/opt/homebrew/bin` or
+`/usr/local/bin`, whichever comes first among those that exist, are on your
+PATH and are writable. Pass `BINDIR=/some/dir` to choose. `make uninstall`
+removes the binary; `make test`, `make check` and `make bench` run the test
+suite, lints and the A/B benchmark.
 
 ## Testing
 
