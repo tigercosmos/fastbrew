@@ -154,16 +154,15 @@ fn tap_enumerate_parse_update_and_untap() {
     assert_eq!(cask.ruby_source_path.as_deref(), Some("Casks/bar.rb"));
 
     // --- update ---------------------------------------------------------
-    assert!(
-        tap::update_all(&cfg, true).expect("update").is_empty(),
-        "nothing changed upstream yet"
-    );
+    let updates = tap::update_all(&cfg, true);
+    assert!(updates.changed.is_empty(), "nothing changed upstream yet");
+    assert!(updates.failures.is_empty(), "{:?}", updates.failures);
 
     std::fs::write(remote_dir.path().join("Formula/baz.rb"), BAZ_RB).expect("write baz.rb");
     git(remote_dir.path(), &["add", "-A"]);
     git(remote_dir.path(), &["commit", "--quiet", "-m", "Add baz"]);
 
-    let changed = tap::update_all(&cfg, true).expect("update");
+    let changed = tap::update_all(&cfg, true).changed;
     assert_eq!(changed, vec![t.clone()], "the tap moved");
     assert!(path.join("Formula/baz.rb").is_file());
     let names: Vec<String> = tap::formula_files(&cfg, &t)

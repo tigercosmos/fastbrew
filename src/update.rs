@@ -27,6 +27,8 @@ pub struct UpdateReport {
     pub deleted_casks: Vec<String>,
     pub outdated_formulae: Vec<String>,
     pub outdated_casks: Vec<String>,
+    /// Taps whose fetch failed (`HOMEBREW_UPDATE_FAILED`).
+    pub tap_failures: Vec<String>,
     /// One-line descriptions for the `New Formulae` and `New Casks` sections.
     pub descriptions: BTreeMap<String, String>,
 }
@@ -153,9 +155,10 @@ pub fn update(cfg: &Config, force: bool, quiet: bool, auto: bool) -> Result<Upda
     // The API fetch and the tap pulls are independent; run them together.
     let (api, taps) = rayon::join(
         || fetch::fetch_packages(cfg, &tag, stale, quiet),
-        || crate::tap::update_all(cfg, true),
+        || crate::tap::update_all(cfg, quiet),
     );
-    let moved_taps = taps.unwrap_or_default();
+    report.tap_failures = taps.failures;
+    let moved_taps = taps.changed;
     report.api_updated = api? == FetchOutcome::Updated;
 
     // Rebuild (or reuse) the fast index for the current file.
@@ -305,6 +308,12 @@ fn to_sentence(items: &[String]) -> String {
 /// plain "Deleted Formulae" sections: only new packages, deleted packages
 /// that are installed, and the outdated summary.
 pub fn print_report(cfg: &Config, report: &UpdateReport, quiet: bool) {
+    // `update.sh`: `onoe <"${update_failed_file}"` and
+    // `Homebrew.failed = true if ENV["HOMEBREW_UPDATE_FAILED"]`. A failed tap
+    // also suppresses the `Already up-to-date.` line below.
+    for failure in &report.tap_failures {
+        output::ofail(failure);
+    }
     if !report.taps_updated.is_empty() {
         println!(
             "Updated {} ({}).",
@@ -313,7 +322,7 @@ pub fn print_report(cfg: &Config, report: &UpdateReport, quiet: bool) {
         );
     }
     if !report.updated() {
-        if !quiet && !report.auto_update {
+        if !quiet && !report.auto_update && report.tap_failures.is_empty() {
             println!("Already up-to-date.");
         }
         return;

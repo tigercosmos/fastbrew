@@ -515,6 +515,119 @@ fn untap_of_a_missing_tap_names_the_tap_new_command() {
     );
 }
 
+/// `git` with the identity and hooks a test needs, never the user's.
+fn git(dir: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "user.name=fastbrew tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "protocol.file.allow=always",
+        ])
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("run git")
+        .status
+        .success()
+}
+
+/// A git repository shaped like a tap, for `tap` to clone over `file://`.
+fn make_tap_remote(dir: &Path) {
+    std::fs::create_dir_all(dir.join("Formula")).expect("mkdir Formula");
+    std::fs::write(
+        dir.join("Formula/scenario.rb"),
+        "class Scenario < Formula\n  desc \"Scenario fixture\"\n  \
+         homepage \"https://example.invalid/scenario\"\n  \
+         url \"https://example.invalid/scenario-1.0.tar.gz\"\n  \
+         sha256 \"1111111111111111111111111111111111111111111111111111111111111111\"\nend\n",
+    )
+    .expect("write formula");
+    assert!(git(dir, &["init", "--initial-branch=main", "--quiet"]));
+    assert!(git(dir, &["add", "-A"]));
+    assert!(git(dir, &["commit", "--quiet", "-m", "Add scenario"]));
+}
+
+/// A tap whose remote has gone away is `Fetching <dir> failed!`, and it makes
+/// the whole `update` fail instead of reporting "Already up-to-date."
+/// (`cmd/update.sh`'s `HOMEBREW_UPDATE_FAILED`).
+#[test]
+fn update_fails_when_a_taps_remote_cannot_be_fetched() {
+    let env = env_or_skip!();
+    let remote = tempfile::tempdir().expect("tempdir");
+    make_tap_remote(remote.path());
+    let url = format!("file://{}", remote.path().display());
+
+    let out = env.run(&["tap", "tiger/scenario", &url]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The API is unreachable, so only the taps can move.
+    let update = |env: &Env| {
+        env.cmd()
+            .args(["update"])
+            .env("HOMEBREW_API_DOMAIN", "http://127.0.0.1:1/api")
+            .env("HOMEBREW_CURL_RETRIES", "0")
+            .output()
+            .expect("run fastbrew")
+    };
+
+    let out = update(&env);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "Already up-to-date."
+    );
+
+    // Take the remote away: the fetch fails, and so does `update`.
+    let moved = remote.path().with_extension("gone");
+    std::fs::rename(remote.path(), &moved).expect("move the remote aside");
+    let out = update(&env);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a failed tap fetch fails update"
+    );
+    let stderr = support::strip_ansi(&String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stderr.contains("Error: Fetching ") && stderr.contains("homebrew-scenario failed!"),
+        "{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("Already up-to-date."),
+        "a failed update is not up to date:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // Putting it back makes `update` succeed again.
+    std::fs::rename(&moved, remote.path()).expect("restore the remote");
+    let out = update(&env);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "Already up-to-date."
+    );
+}
+
 // ---------------------------------------------------------- general CLI
 
 /// `brew` with no arguments prints `HOMEBREW_HELP_MESSAGE` on stderr and
