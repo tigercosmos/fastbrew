@@ -17,8 +17,34 @@ developer commands, `brew bundle`) are delegated to an installed `brew`.
 
 ## Status
 
-Under active development. See `docs/DESIGN.md` for the architecture and
-`docs/COMPAT.md` for the Homebrew formats fastbrew reproduces.
+Working end to end on Apple Silicon macOS: formula install/upgrade/uninstall
+from bottles (with relocation and code signing), casks (dmg/zip/pkg
+containers, all common artifact kinds), taps, services, update, cleanup,
+pin, and every common query command. Kegs and Caskroom entries are
+byte-compatible with Homebrew 6: `brew` can list, upgrade and uninstall what
+fastbrew installed and vice versa. Linux is not supported yet.
+
+See `docs/DESIGN.md` for the architecture and `docs/COMPAT.md` for the
+Homebrew formats fastbrew reproduces.
+
+## Speed
+
+Measured with `scripts/bench.sh` on an M-series Mac, both tools warm and
+inside the same sandbox prefix (Homebrew 6, portable Ruby):
+
+| command | brew | fastbrew |
+|---|---|---|
+| `info jq` | 348 ms | 4.4 ms |
+| `search --desc json` | 330 ms | 6.8 ms |
+| `deps --tree jq` | 327 ms | 4.2 ms |
+| `outdated` | 275 ms | 4.1 ms |
+| `uses --installed openssl@3` | 311 ms | 4.1 ms |
+| `search ripgrep` | 394 ms | 10.2 ms |
+| `install jq` (downloads included) | about 4 s | 0.8 s |
+| `install jq` (bottles cached) | about 2 s | 0.03 s |
+
+The 15 MB package index is parsed once per `update` into a memory-mapped
+file; every query afterwards is a few microseconds of lookups.
 
 ## Building
 
