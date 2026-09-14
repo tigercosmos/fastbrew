@@ -82,6 +82,22 @@ impl InstalledCask {
             .join("LATEST_DOWNLOAD_SHA256")
     }
 
+    /// `Cask#install_time`: the timestamp directory of the latest install.
+    ///
+    /// Homebrew writes the directory name in UTC (`Metadata.new_timestamp`)
+    /// but reads it back with `Time.strptime`, which resolves it in the local
+    /// zone; `info --json` therefore reports a time shifted by the local UTC
+    /// offset. fastbrew reproduces the value Homebrew prints.
+    pub fn install_time(&self) -> Option<i64> {
+        use chrono::{NaiveDateTime, TimeZone};
+        let stamp = self.metadata_path.as_ref()?.file_name()?.to_str()?;
+        let naive = NaiveDateTime::parse_from_str(stamp, "%Y%m%d%H%M%S%.f").ok()?;
+        chrono::Local
+            .from_local_datetime(&naive)
+            .single()
+            .map(|t| t.timestamp())
+    }
+
     /// `.metadata/<version>/<timestamp>/Casks/<token>.{json,internal.json,rb}`.
     pub fn caskfile_path(&self) -> Option<PathBuf> {
         let dir = self.metadata_path.as_ref()?.join("Casks");
@@ -194,6 +210,58 @@ pub fn installed_cask(cfg: &Config, token: &str) -> Option<InstalledCask> {
         return None;
     }
     discover(&path)
+}
+
+// ------------------------------------------------------------- pinning
+
+/// `Cask#pin_path`: `$PREFIX/var/homebrew/pinned_casks/<token>`.
+pub fn pin_path(cfg: &Config, token: &str) -> PathBuf {
+    cfg.pinned_casks().join(token_from_full_token(token))
+}
+
+/// `Cask#pinned?`: a symlink that still resolves.
+pub fn is_pinned(cfg: &Config, token: &str) -> bool {
+    let path = pin_path(cfg, token);
+    path.is_symlink() && path.exists()
+}
+
+/// `Cask#pinned_version`: the staged version the pin points at.
+pub fn pinned_version(cfg: &Config, token: &str) -> Option<String> {
+    if !is_pinned(cfg, token) {
+        return None;
+    }
+    std::fs::canonicalize(pin_path(cfg, token))
+        .ok()?
+        .file_name()?
+        .to_str()
+        .map(str::to_string)
+}
+
+/// `Cask#pin`: a relative symlink to the installed version's staged directory.
+pub fn pin(cfg: &Config, installed: &InstalledCask) -> crate::error::Result<()> {
+    let versioned = installed.staged_path();
+    if !versioned.exists() {
+        return Ok(());
+    }
+    let path = pin_path(cfg, &installed.token);
+    std::fs::create_dir_all(cfg.pinned_casks())?;
+    if is_pinned(cfg, &installed.token) {
+        return Ok(());
+    }
+    if path.is_symlink() || path.is_file() {
+        std::fs::remove_file(&path)?;
+    }
+    crate::keg::make_relative_symlink(&path, &versioned)?;
+    Ok(())
+}
+
+/// `Cask#unpin`: drop the record, even when it dangles.
+pub fn unpin(cfg: &Config, token: &str) -> crate::error::Result<()> {
+    let path = pin_path(cfg, token);
+    if path.is_symlink() || path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(())
 }
 
 /// Shared fixtures for the unit tests of the cask modules.

@@ -464,6 +464,12 @@ pub fn dispatch(ctx: &Ctx, argv: &[OsString]) -> Result<()> {
                 .first()
                 .map(|a| a.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            // A tap's `cmd/brew-<name>` (or a `brew-<name>` on `PATH`) is an
+            // external command, which `brew.rb` `exec`s itself rather than
+            // handing to a command implementation.
+            if let Some(path) = misc::external_command_path(&ctx.cfg, &name) {
+                return Err(misc::exec_external_command(&ctx.cfg, &path, &args[1..]));
+            }
             ctx.delegate(&format!("`{name}` is not implemented by fastbrew"))
         }
     }

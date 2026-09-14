@@ -28,21 +28,25 @@ fn kind_of(formula: bool, cask: bool) -> Kind {
 
 /// Split names into resolved formulae and casks.
 ///
-/// The resolved formula entry is what reaches `ops`, not its bare name:
+/// The resolved entry is what reaches `ops` and `cask`, not its bare name:
 /// re-resolving `user/repo/jq` downstream would give core's `jq`, because the
-/// API loader runs before any tap loader.
+/// API loader runs before any tap loader, and the same holds for a cask a tap
+/// qualifies.
 fn partition(
     ctx: &Ctx,
     names: &[String],
     kind: Kind,
-) -> Result<(Vec<crate::model::FormulaEntry>, Vec<String>)> {
+) -> Result<(
+    Vec<crate::model::FormulaEntry>,
+    Vec<crate::model::CaskEntry>,
+)> {
     let index = ctx.index()?;
     let mut formulae = Vec::new();
     let mut casks = Vec::new();
     for name in names {
         match resolve::resolve(&ctx.cfg, index, name, kind)? {
             resolve::Resolved::Formula(f) => formulae.push(f),
-            resolve::Resolved::Cask(c) => casks.push(c.token),
+            resolve::Resolved::Cask(c) => casks.push(c),
         }
     }
     Ok((formulae, casks))
@@ -85,6 +89,15 @@ pub struct InstallArgs {
     pub adopt: bool,
     #[arg(long)]
     pub skip_cask_deps: bool,
+    /// Require all casks to have a checksum.
+    #[arg(long)]
+    pub require_sha: bool,
+    /// Disable linking of a cask's helper executables.
+    #[arg(long)]
+    pub no_binaries: bool,
+    /// Enable linking of a cask's helper executables (the default).
+    #[arg(long, conflicts_with = "no_binaries")]
+    pub binaries: bool,
     #[arg(long, value_name = "path")]
     pub appdir: Option<String>,
     #[arg(long, value_name = "path")]
@@ -137,6 +150,16 @@ fn cask_options(ctx: &Ctx, args: &InstallArgs, reinstall: bool) -> CaskInstallOp
     if let Some(d) = &args.fontdir {
         explicit_dir_flags.push(format!("--fontdir={d}"));
     }
+    // `cask_options`: the switches come from the command line first, then
+    // from `HOMEBREW_CASK_OPTS`.
+    let env = &ctx.cfg.cask_opts;
+    let binaries = if args.binaries {
+        Some(true)
+    } else if args.no_binaries {
+        Some(false)
+    } else {
+        crate::cask::config::bool_flag(env, "binaries")
+    };
     CaskInstallOptions {
         force: args.force,
         adopt: args.adopt,
@@ -146,7 +169,9 @@ fn cask_options(ctx: &Ctx, args: &InstallArgs, reinstall: bool) -> CaskInstallOp
         verbose: ctx.verbose,
         reinstall,
         explicit_dir_flags,
-        skip_binaries: false,
+        skip_binaries: binaries == Some(false),
+        require_sha: args.require_sha
+            || crate::cask::config::bool_flag(env, "require-sha").unwrap_or(false),
         installed_as_dependency: false,
         zap: false,
         upgrade: false,
@@ -168,6 +193,12 @@ pub struct UpgradeArgs {
     pub force: bool,
     #[arg(short = 'g', long)]
     pub greedy: bool,
+    /// Also upgrade casks with `version :latest`.
+    #[arg(long)]
+    pub greedy_latest: bool,
+    /// Also upgrade casks with `auto_updates true`.
+    #[arg(long)]
+    pub greedy_auto_updates: bool,
 }
 
 pub fn upgrade(ctx: &Ctx, args: &UpgradeArgs) -> Result<()> {
@@ -195,7 +226,12 @@ pub fn upgrade(ctx: &Ctx, args: &UpgradeArgs) -> Result<()> {
             verbose: ctx.verbose,
             ..Default::default()
         };
-        crate::cask::install::upgrade_casks(&ctx.cfg, index, &casks, args.greedy, &opts)?;
+        let greedy = crate::cask::install::Greedy {
+            all: args.greedy,
+            latest: args.greedy_latest,
+            auto_updates: args.greedy_auto_updates,
+        };
+        crate::cask::install::upgrade_casks(&ctx.cfg, index, &casks, greedy, &opts)?;
     }
     Ok(())
 }
@@ -237,7 +273,7 @@ pub fn uninstall(ctx: &Ctx, args: &UninstallArgs) -> Result<()> {
             force: args.force,
             dry_run: args.dry_run,
         };
-        crate::cask::uninstall::uninstall_casks(&ctx.cfg, index, &casks, opts)?;
+        crate::cask::uninstall::uninstall_casks(&ctx.cfg, &casks, opts)?;
     }
     Ok(())
 }
@@ -511,23 +547,24 @@ fn prepend_path_in_profile(path: &str) -> String {
 
 #[derive(Args, Debug)]
 pub struct PinArgs {
-    #[arg(value_name = "formula", required = true)]
+    #[arg(value_name = "formula|cask", required = true)]
     pub names: Vec<String>,
     // Homebrew: `conflicts "--formula", "--cask"`.
     #[arg(long, visible_alias = "formulae", conflicts_with = "cask")]
     pub formula: bool,
-    /// Pin a cask (delegates to brew).
     #[arg(long, visible_alias = "casks")]
     pub cask: bool,
 }
 
 pub fn pin(ctx: &Ctx, args: &PinArgs, pin_it: bool) -> Result<()> {
-    if args.cask {
-        let what = if pin_it { "pin" } else { "unpin" };
-        return ctx.delegate(&format!("`{what} --cask` is not implemented by fastbrew"));
-    }
     let index = ctx.index()?;
     for name in &args.names {
+        // `NamedArgs#to_resolved_formulae_to_casks`: a bare name may be
+        // either, and `--cask` makes every name a cask.
+        if args.cask || (!args.formula && is_cask_name(ctx, name)) {
+            pin_cask(ctx, name, pin_it)?;
+            continue;
+        }
         // Pinning acts on an installed keg, so the rack's receipt picks the tap.
         let formula = resolve::resolve_installed(&ctx.cfg, index, name)?;
         let full = formula.full_name();
@@ -554,6 +591,47 @@ pub fn pin(ctx: &Ctx, args: &PinArgs, pin_it: bool) -> Result<()> {
     Ok(())
 }
 
+/// Whether a bare name means a cask here: only an installed one, so a name a
+/// formula also carries keeps meaning the formula (`to_resolved_formulae_to_casks`
+/// resolves formulae first).
+fn is_cask_name(ctx: &Ctx, name: &str) -> bool {
+    crate::keg::installed_kegs(&ctx.cfg, name.rsplit('/').next().unwrap_or(name)).is_empty()
+        && crate::cask::installed_cask(&ctx.cfg, name).is_some()
+}
+
+/// `cmd/pin.rb` and `cmd/unpin.rb` for a cask.
+fn pin_cask(ctx: &Ctx, name: &str, pin_it: bool) -> Result<()> {
+    let index = ctx.index()?;
+    let cask = resolve::resolve_cask(&ctx.cfg, index, name)?;
+    let full = cask.full_token();
+    let installed = crate::cask::installed_cask(&ctx.cfg, &cask.token);
+    let pinned = crate::cask::is_pinned(&ctx.cfg, &cask.token);
+    if pin_it {
+        if pinned {
+            output::opoo(&format!("{full} already pinned"));
+        } else if let Some(installed) = &installed {
+            crate::cask::pin(&ctx.cfg, installed)?;
+            if cask.auto_updates {
+                output::opoo(&format!(
+                    "{full} has `auto_updates true` and may update itself outside Homebrew despite being pinned."
+                ));
+            }
+        } else {
+            output::ofail(&format!("{full} not installed"));
+        }
+        return Ok(());
+    }
+    // `cmd/unpin.rb` drops a dangling record too.
+    if pinned || crate::cask::pin_path(&ctx.cfg, &cask.token).is_symlink() {
+        crate::cask::unpin(&ctx.cfg, &cask.token)?;
+    } else if installed.is_none() {
+        output::onoe(&format!("{full} not installed"));
+    } else {
+        output::opoo(&format!("{full} not pinned"));
+    }
+    Ok(())
+}
+
 #[derive(Args, Debug)]
 pub struct PostinstallArgs {
     #[arg(value_name = "formula", required = true)]
@@ -565,6 +643,15 @@ pub fn postinstall(ctx: &Ctx, args: &PostinstallArgs) -> Result<()> {
     for name in &args.names {
         let formula = resolve::resolve_installed(&ctx.cfg, index, name)?;
         let keg = latest_keg(ctx, &formula.name)?;
+        // A Ruby `post_install` is the Ruby `brew`'s job; `postinstall` is a
+        // whole command, so it hands the invocation over rather than
+        // shelling out mid-run.
+        if crate::ops::postinstall::needs_ruby_post_install(&formula) {
+            return ctx.delegate(&format!(
+                "`{}`'s post_install needs the Ruby formula DSL",
+                formula.full_name()
+            ));
+        }
         crate::ops::postinstall::run_post_install(&ctx.cfg, &formula, &keg)?;
     }
     Ok(())
@@ -593,7 +680,7 @@ pub fn fetch(ctx: &Ctx, args: &FetchArgs) -> Result<()> {
         crate::ops::install::fetch_formulae(&ctx.cfg, index, &formulae, args.deps, args.force)?;
     }
     if !casks.is_empty() {
-        crate::cask::install::fetch_casks(&ctx.cfg, index, &casks, args.force)?;
+        crate::cask::install::fetch_casks(&ctx.cfg, &casks, args.force)?;
     }
     Ok(())
 }

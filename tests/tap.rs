@@ -154,16 +154,15 @@ fn tap_enumerate_parse_update_and_untap() {
     assert_eq!(cask.ruby_source_path.as_deref(), Some("Casks/bar.rb"));
 
     // --- update ---------------------------------------------------------
-    assert!(
-        tap::update_all(&cfg, true).expect("update").is_empty(),
-        "nothing changed upstream yet"
-    );
+    let updates = tap::update_all(&cfg, true);
+    assert!(updates.changed.is_empty(), "nothing changed upstream yet");
+    assert!(updates.failures.is_empty(), "{:?}", updates.failures);
 
     std::fs::write(remote_dir.path().join("Formula/baz.rb"), BAZ_RB).expect("write baz.rb");
     git(remote_dir.path(), &["add", "-A"]);
     git(remote_dir.path(), &["commit", "--quiet", "-m", "Add baz"]);
 
-    let changed = tap::update_all(&cfg, true).expect("update");
+    let changed = tap::update_all(&cfg, true).changed;
     assert_eq!(changed, vec![t.clone()], "the tap moved");
     assert!(path.join("Formula/baz.rb").is_file());
     let names: Vec<String> = tap::formula_files(&cfg, &t)
@@ -194,8 +193,13 @@ fn tap_enumerate_parse_update_and_untap() {
     assert!(!path.exists());
     assert!(!tap::installed_taps(&cfg).contains(&t));
 
+    // `TapUnavailableError` names the command that would create the tap.
     let err = tap::untap(&cfg, "testuser/test", false).expect_err("not tapped");
-    assert_eq!(err.to_string(), "No available tap testuser/test.\n");
+    assert_eq!(
+        support::strip_ansi(&err.to_string()),
+        "No available tap testuser/test.\n\
+         Run brew tap-new testuser/test to create a new testuser/test tap!\n"
+    );
 }
 
 #[test]
@@ -454,6 +458,16 @@ fn taps_oven_sh_bun_and_reads_it() {
     );
     // The formula count moves with the tap, so only its shape is asserted.
     assert!(tap_info.contains(" formulae\n"), "{tap_info}");
+
+    // bun ships no bottle, so even a dry run is the Ruby `brew`'s job and the
+    // delegation names why.
+    let out = sandbox.run(&["install", "--dry-run", "oven-sh/bun/bun"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = support::strip_ansi(&String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stderr.contains("refusing to delegate to brew (bun: no bottle available!)"),
+        "{stderr}"
+    );
 
     let out = sandbox.run(&["untap", "oven-sh/bun"]);
     assert!(

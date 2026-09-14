@@ -33,6 +33,8 @@ pub struct CaskInstallOptions {
     pub explicit_dir_flags: Vec<String>,
     /// `--no-binaries`.
     pub skip_binaries: bool,
+    /// `--require-sha`: refuse a cask whose `sha256` is `:no_check`.
+    pub require_sha: bool,
     /// Installed to satisfy another cask or formula (`installed_on_request: false`).
     pub installed_as_dependency: bool,
     /// Reverse the artifacts with `zap` when replacing an installed version.
@@ -58,64 +60,153 @@ impl CaskInstallOptions {
 pub fn install_casks(
     cfg: &Config,
     index: &Index,
-    tokens: &[String],
+    casks: &[CaskEntry],
     opts: &CaskInstallOptions,
 ) -> Result<()> {
-    let mut failed: Vec<String> = Vec::new();
-    for token in tokens {
-        let cask = crate::resolve::resolve_cask(cfg, index, token)?;
+    if opts.dry_run {
+        return print_dry_run(cfg, casks, opts);
+    }
+    for cask in casks {
         let _lock = crate::keg::lock::lock_cask(cfg, &cask.token)?;
         let dirs = CaskDirs::resolve(cfg, &opts.explicit_dir_flags);
-        if let Err(error) = install_cask_entry(cfg, Some(index), &dirs, &cask, opts) {
-            output::onoe(&format!("{}: {error}", cask.full_token()));
-            failed.push(cask.full_token());
+        // `cmd/install.rb`: `rescue => e; ofail "#{cask.full_name}: #{e}"`.
+        // The run keeps going and ends up exiting 1, with no line of its own.
+        if let Err(error) = install_cask_entry(cfg, Some(index), &dirs, cask, opts) {
+            output::ofail(&format!("{}: {error}", cask.full_token()));
         }
     }
-    if failed.is_empty() {
-        Ok(())
-    } else {
-        Err(Error::user(format!(
-            "Failed to install {}.",
-            failed.join(", ")
-        )))
+    Ok(())
+}
+
+/// `Install.print_dry_run_casks(casks, include_installed: false)`: what
+/// `install --cask --dry-run` reports. An installed cask is left out
+/// entirely, and nothing is fetched or written.
+fn print_dry_run(cfg: &Config, casks: &[CaskEntry], opts: &CaskInstallOptions) -> Result<()> {
+    let pending: Vec<&CaskEntry> = casks
+        .iter()
+        .filter(|c| super::installed_cask(cfg, &c.token).is_none())
+        .collect();
+    if !pending.is_empty() {
+        output::ohai(&format!(
+            "Would install {}:",
+            output::plural(pending.len() as u64, "cask")
+        ));
+        println!(
+            "{}",
+            pending
+                .iter()
+                .map(|c| c.full_token())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
+    for cask in casks {
+        let mut deps: Vec<String> = Vec::new();
+        if !opts.skip_cask_deps {
+            deps.extend(
+                cask.cask_dependencies()
+                    .into_iter()
+                    .filter(|token| super::installed_cask(cfg, token).is_none()),
+            );
+        }
+        deps.extend(
+            cask.formula_dependencies()
+                .into_iter()
+                .filter(|name| crate::keg::installed_kegs(cfg, name).is_empty()),
+        );
+        deps.dedup();
+        if deps.is_empty() {
+            continue;
+        }
+        output::ohai(&format!(
+            "Would install {} {} for {}:",
+            deps.len(),
+            if deps.len() == 1 {
+                "dependency"
+            } else {
+                "dependencies"
+            },
+            cask.full_token()
+        ));
+        println!("{}", deps.join(" "));
+    }
+    Ok(())
 }
 
 pub fn upgrade_casks(
     cfg: &Config,
     index: &Index,
-    tokens: &[String],
-    greedy: bool,
+    casks: &[CaskEntry],
+    greedy: Greedy,
     opts: &CaskInstallOptions,
 ) -> Result<()> {
-    let targets: Vec<String> = if tokens.is_empty() {
+    // An empty list is `brew upgrade --cask` with no arguments: every
+    // installed cask, resolved through the Caskroom's own tokens.
+    let named = !casks.is_empty();
+    let targets: Vec<CaskEntry> = if named {
+        casks.to_vec()
+    } else {
         super::installed_casks(cfg)
             .into_iter()
-            .map(|c| c.token)
+            .filter_map(|c| crate::resolve::resolve_cask(cfg, index, &c.token).ok())
             .collect()
-    } else {
-        tokens.to_vec()
     };
 
     let mut upgrades: Vec<(CaskEntry, InstalledCask)> = Vec::new();
-    for token in &targets {
-        let cask = crate::resolve::resolve_cask(cfg, index, token)?;
+    for cask in targets {
         let Some(installed) = super::installed_cask(cfg, &cask.token) else {
-            if tokens.is_empty() {
+            if !named {
                 continue;
             }
-            return Err(Error::user(format!("Cask '{token}' is not installed.")));
+            return Err(Error::user(format!(
+                "Cask '{}' is not installed.",
+                cask.token
+            )));
         };
-        if !is_outdated(&cask, &installed, greedy) {
-            if !opts.quiet {
+        // `Cask::Upgrade.outdated_casks`: a cask named on the command line is
+        // checked greedily, the sweep over every installed cask is not.
+        let greedy = if named { Greedy::ALL } else { greedy };
+        if !is_outdated(cfg, &cask, &installed, greedy) {
+            // The sweep says nothing about the casks it leaves alone; only
+            // the named form reports why it is skipping one.
+            if named && !opts.quiet {
                 output::opoo(&format!(
-                    "Not upgrading {}, the latest version is already installed",
-                    cask.token
+                    "Not upgrading {}, {}",
+                    cask.token,
+                    not_upgrading_reason(&cask)
                 ));
             }
             continue;
         }
         upgrades.push((cask, installed));
+    }
+
+    // `Cask::Upgrade.outdated_casks`: a pinned cask is never upgraded, and the
+    // ones it drops are reported (as a failure when they were named).
+    let pinned: Vec<String> = upgrades
+        .iter()
+        .filter(|(cask, _)| super::is_pinned(cfg, &cask.token))
+        .map(|(cask, installed)| format!("{} {}", cask.full_token(), installed.version))
+        .collect();
+    upgrades.retain(|(cask, _)| !super::is_pinned(cfg, &cask.token));
+    if !pinned.is_empty() && (!opts.quiet || named) {
+        let message = format!(
+            "Not upgrading {} pinned {}:",
+            pinned.len(),
+            if pinned.len() == 1 {
+                "package"
+            } else {
+                "packages"
+            }
+        );
+        if named {
+            output::ofail(&message);
+        } else {
+            output::opoo(&message);
+        }
+        if !opts.quiet {
+            eprintln!("{}", pinned.join(", "));
+        }
     }
 
     if upgrades.is_empty() {
@@ -157,10 +248,9 @@ pub fn upgrade_casks(
     Ok(())
 }
 
-pub fn fetch_casks(cfg: &Config, index: &Index, tokens: &[String], force: bool) -> Result<()> {
-    for token in tokens {
-        let cask = crate::resolve::resolve_cask(cfg, index, token)?;
-        fetch_cask_entry(cfg, &cask, force)?;
+pub fn fetch_casks(cfg: &Config, casks: &[CaskEntry], force: bool) -> Result<()> {
+    for cask in casks {
+        fetch_cask_entry(cfg, cask, force)?;
     }
     Ok(())
 }
@@ -189,6 +279,9 @@ pub fn install_cask_entry(
     opts: &CaskInstallOptions,
 ) -> Result<()> {
     prelude(cfg, cask)?;
+    if opts.require_sha && !opts.force {
+        verify_has_sha(cask)?;
+    }
 
     let installed = super::installed_cask(cfg, &cask.token);
     if let Some(installed) = &installed
@@ -200,11 +293,14 @@ pub fn install_cask_entry(
             output::opoo(&format!("Cask '{}' is already installed.", cask.token));
             return Ok(());
         }
-        if !is_outdated(cask, installed, false) {
+        // `cmd/install.rb` hands its named casks to
+        // `Cask::Upgrade.outdated_casks`, which checks each of them greedily.
+        if !is_outdated(cfg, cask, installed, Greedy::ALL) {
             if !opts.quiet {
                 output::opoo(&format!(
-                    "Not upgrading {}, the latest version is already installed",
-                    cask.token
+                    "Not upgrading {}, {}",
+                    cask.token,
+                    not_upgrading_reason(cask)
                 ));
             }
             return Ok(());
@@ -388,17 +484,26 @@ fn replace_installed(
         force: true,
         ..opts.artifact_options()
     };
-    artifacts::uninstall_specs(
-        cfg,
-        dirs,
-        &predecessor_specs,
-        &predecessor_ctx,
-        opts.zap,
-        predecessor_opts,
-    )?;
 
-    let backup = Backup::create(installed)?;
-    match install_download(cfg, index, dirs, cask, opts, download, true) {
+    // Reversing the predecessor's artifacts is already destructive: an
+    // `uninstall` directive that fails halfway has moved the app out of the
+    // app directory, so the revert has to cover this step and the backup
+    // rename as well, not just the install of the replacement.
+    let mut backup: Option<Backup> = None;
+    let outcome = (|| -> Result<()> {
+        artifacts::uninstall_specs(
+            cfg,
+            dirs,
+            &predecessor_specs,
+            &predecessor_ctx,
+            opts.zap,
+            predecessor_opts,
+        )?;
+        backup = Some(Backup::create(installed)?);
+        install_download(cfg, index, dirs, cask, opts, download, true)
+    })();
+
+    match outcome {
         Ok(()) => {
             // `Cask::Installer#finalize_upgrade`.
             if opts.upgrade {
@@ -407,14 +512,18 @@ fn replace_installed(
                     installed.version, cask.token
                 ));
             }
-            backup.purge();
+            if let Some(backup) = &backup {
+                backup.purge();
+            }
             Ok(())
         }
         Err(error) => {
             // `Cask::Installer#revert_upgrade`: the predecessor was working, so
             // put its staged files, metadata and artifacts back.
             output::opoo(&format!("Reverting upgrade for Cask {}", cask.token));
-            backup.restore();
+            if let Some(backup) = &backup {
+                backup.restore();
+            }
             if let Err(rollback) = artifacts::install_specs(
                 cfg,
                 dirs,
@@ -492,6 +601,23 @@ impl Backup {
 
 // ------------------------------------------------------------- checks
 
+/// `Cask::Download#verify_has_sha`: `--require-sha` refuses a cask that has
+/// no checksum to verify.
+pub fn verify_has_sha(cask: &CaskEntry) -> Result<()> {
+    let has_checksum = cask
+        .sha256
+        .as_deref()
+        .is_some_and(|s| !s.starts_with(':') && !s.is_empty());
+    if has_checksum {
+        return Ok(());
+    }
+    Err(Error::user(format!(
+        "Cask '{}' does not have a sha256 checksum defined.\nThis means you have the {} option set, perhaps in your `$HOMEBREW_CASK_OPTS`.",
+        cask.token,
+        output::green("--require-sha")
+    )))
+}
+
 /// `Cask::Installer#prelude`.
 pub fn prelude(cfg: &Config, cask: &CaskEntry) -> Result<()> {
     check_deprecate_disable(cask)?;
@@ -501,37 +627,138 @@ pub fn prelude(cfg: &Config, cask: &CaskEntry) -> Result<()> {
 
 /// `Cask::Installer#check_deprecate_disable`.
 pub fn check_deprecate_disable(cask: &CaskEntry) -> Result<()> {
-    if let Some(args) = &cask.disable_args {
-        return Err(Error::user(format!(
-            "{} has been disabled{}",
-            cask.token,
-            because(args)
-        )));
+    let Some(message) = deprecate_disable_message(cask) else {
+        return Ok(());
+    };
+    let full = format!("{} has been {message}", cask.token);
+    // `DeprecateDisable.type` reports a deprecation first, and only a
+    // disabling refuses the install.
+    if cask.deprecate_args.is_some() {
+        output::opoo(&full);
+        return Ok(());
     }
-    if let Some(args) = &cask.deprecate_args {
-        output::opoo(&format!(
-            "{} has been deprecated{}",
-            cask.token,
-            because(args)
-        ));
-    }
-    Ok(())
+    Err(Error::user(full))
+}
+
+/// `DeprecateDisable::CASK_DEPRECATE_DISABLE_REASONS`: the sentence each
+/// symbolic reason stands for.
+fn cask_reason(symbol: &str) -> Option<&'static str> {
+    Some(match symbol {
+        "discontinued" => "is discontinued upstream",
+        "moved_to_mas" => "is now exclusively distributed on the Mac App Store",
+        "no_longer_available" => "is no longer available upstream",
+        "no_longer_meets_criteria" => "no longer meets the criteria for acceptable casks",
+        "unmaintained" => "is not maintained upstream",
+        "fails_gatekeeper_check" => "does not pass the macOS Gatekeeper check",
+        "unreachable" => "is no longer reliably reachable upstream",
+        _ => return None,
+    })
+}
+
+/// `DeprecateDisable.message`: `deprecated|disabled because it <reason>!`,
+/// plus the disable date in the tense the date calls for.
+pub fn deprecate_disable_message(cask: &CaskEntry) -> Option<String> {
+    // `DeprecateDisable.type` reports a deprecation before a disabling.
+    let (kind, args) = match (&cask.deprecate_args, &cask.disable_args) {
+        (Some(args), _) => ("deprecated", args),
+        (None, Some(args)) => ("disabled", args),
+        (None, None) => return None,
+    };
+    Some(format!("{kind}{}", because(args)))
 }
 
 fn because(args: &Value) -> String {
-    let reason = args
-        .get(":because")
-        .and_then(Value::as_str)
-        .map(|r| sym(r).replace('_', " "));
+    let reason = args.get(":because").and_then(Value::as_str).map(|r| {
+        let symbol = sym(r);
+        cask_reason(symbol)
+            .map(str::to_string)
+            .unwrap_or_else(|| symbol.replace('_', " "))
+    });
     let date = args.get(":date").and_then(Value::as_str);
-    match (reason, date) {
-        (Some(reason), Some(date)) => {
-            format!(" because it {reason}! It will be disabled on {date}.")
+    let when = date.map(|date| {
+        let past = date < chrono::Local::now().format("%Y-%m-%d").to_string().as_str();
+        if past {
+            format!(" It was disabled on {date}.")
+        } else {
+            format!(" It will be disabled on {date}.")
         }
+    });
+    match (reason, when) {
+        (Some(reason), Some(when)) => format!(" because it {reason}!{when}"),
         (Some(reason), None) => format!(" because it {reason}!"),
-        (None, Some(date)) => format!("! It will be disabled on {date}."),
+        (None, Some(when)) => format!("!{when}"),
         (None, None) => "!".to_string(),
     }
+}
+
+/// `Cask::Info.requirements_info`'s `Required:` line: the `depends_on macos`
+/// and `arch` requirements as `MacOSRequirement#display_s` spells them.
+pub fn requirement_display_strings(cask: &CaskEntry) -> Vec<(String, bool)> {
+    let host = Host::detect();
+    let mut out: Vec<(String, bool)> = Vec::new();
+    // `CaskDependent#requirements` collects the architectures first, then
+    // `macos`, then `maximum_macos`.
+    if let Some(arch) = cask.arch_requirement() {
+        let wanted: Vec<String> = match arch {
+            Value::String(s) => vec![sym(s).to_string()],
+            Value::Array(a) => a
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|s| sym(s).to_string())
+                .collect(),
+            _ => vec![],
+        };
+        let current = match host.arch {
+            crate::platform::Arch::Arm64 => "arm64",
+            crate::platform::Arch::X86_64 => "intel",
+        };
+        for arch in wanted {
+            let satisfied = arch == current || arch == host.arch.as_str();
+            // `ArchRequirement` normalises the 64-bit DSL symbols.
+            let shown = match arch.as_str() {
+                "intel" => "x86_64".to_string(),
+                "arm" => "arm64".to_string(),
+                other => other.to_string(),
+            };
+            out.push((format!("{shown} architecture"), satisfied));
+        }
+    }
+    for (requirement, default) in [
+        (cask.macos_requirement(), ">="),
+        (
+            cask.depends_on_args
+                .as_ref()
+                .and_then(|d| d.get(":maximum_macos")),
+            "<=",
+        ),
+    ] {
+        let Some(requirement) = requirement else {
+            continue;
+        };
+        let satisfied = host
+            .macos
+            .is_none_or(|current| macos_requirement_error(requirement, default, current).is_none());
+        match parse_macos_requirement(requirement, default) {
+            Some((comparator, symbols)) => {
+                let versions: Vec<String> = symbols
+                    .iter()
+                    .filter_map(|s| MacOsVersion::major_for_symbol(s))
+                    .map(|v| v.to_string())
+                    .collect();
+                if versions.is_empty() {
+                    out.push(("macOS".to_string(), satisfied));
+                } else {
+                    out.push((
+                        format!("macOS {comparator} {}", versions.join(" / ")),
+                        satisfied,
+                    ));
+                }
+            }
+            // `depends_on macos: :any` and an empty hash are just "macOS".
+            None => out.push(("macOS".to_string(), satisfied)),
+        }
+    }
+    out
 }
 
 /// `Cask::Installer#check_conflicts`.
@@ -904,12 +1131,78 @@ pub fn api_file_path(cfg: &Config) -> String {
         .into_owned()
 }
 
+/// `--greedy`, `--greedy-latest` and `--greedy-auto-updates`: which of the
+/// casks that keep themselves current an outdated check still considers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Greedy {
+    /// `--greedy`: both of the below.
+    pub all: bool,
+    /// `--greedy-latest`: `version :latest` casks.
+    pub latest: bool,
+    /// `--greedy-auto-updates`: `auto_updates true` casks.
+    pub auto_updates: bool,
+}
+
+impl Greedy {
+    /// What `Cask::Upgrade.outdated_casks` uses for a cask named on the
+    /// command line (`outdated?(greedy: true)`).
+    pub const ALL: Greedy = Greedy {
+        all: true,
+        latest: true,
+        auto_updates: true,
+    };
+
+    fn latest(self) -> bool {
+        self.all || self.latest
+    }
+
+    fn auto_updates(self) -> bool {
+        self.all || self.auto_updates
+    }
+}
+
 /// `Cask#outdated_version`, restricted to what the internal API can answer.
-pub fn is_outdated(cask: &CaskEntry, installed: &InstalledCask, greedy: bool) -> bool {
+pub fn is_outdated(
+    cfg: &Config,
+    cask: &CaskEntry,
+    installed: &InstalledCask,
+    greedy: Greedy,
+) -> bool {
     match cask.version.as_deref() {
         None => false,
-        Some("latest") => greedy,
-        Some(version) => version != installed.version,
+        // A `version :latest` cask carries no version to compare, so Homebrew
+        // fetches the container again and compares its checksum.
+        Some("latest") => greedy.latest() && outdated_download_sha(cfg, cask, installed),
+        Some(version) if version == installed.version => false,
+        // An `auto_updates` cask updates itself; Homebrew leaves it alone
+        // unless the check is greedy.
+        Some(_) => greedy.auto_updates() || !cask.auto_updates,
+    }
+}
+
+/// `Cask#outdated_download_sha?`: fetch the container and compare its sha256
+/// with `LATEST_DOWNLOAD_SHA256`, recorded when the cask was installed. A
+/// missing record, or a download that cannot be checksummed, counts as
+/// outdated exactly as `checksumable?` returning false does.
+fn outdated_download_sha(cfg: &Config, cask: &CaskEntry, installed: &InstalledCask) -> bool {
+    let recorded = std::fs::read_to_string(installed.download_sha_path())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if recorded.is_empty() {
+        return true;
+    }
+    super::download::download_cask(cfg, cask, true)
+        .and_then(|path| super::download::file_sha256(&path))
+        .map(|current| current != recorded)
+        .unwrap_or(true)
+}
+
+/// `Cask::Upgrade.outdated_casks`' wording for a named cask it is skipping.
+fn not_upgrading_reason(cask: &CaskEntry) -> &'static str {
+    if cask.is_latest() {
+        "the downloaded artifact has not changed"
+    } else {
+        "the latest version is already installed"
     }
 }
 
@@ -1013,49 +1306,164 @@ mod tests {
     #[test]
     fn deprecation_and_disabling() {
         let deprecated = cask(serde_json::json!({
-            "deprecate_args": {":date": "2025-01-01", ":because": ":discontinued"}
+            "deprecate_args": {":date": "2999-01-01", ":because": ":discontinued"}
         }));
         assert!(check_deprecate_disable(&deprecated).is_ok());
+        assert_eq!(
+            deprecate_disable_message(&deprecated).unwrap(),
+            "deprecated because it is discontinued upstream! It will be disabled on 2999-01-01."
+        );
 
+        // A date that has passed is reported in the past tense.
         let disabled = cask(serde_json::json!({
             "disable_args": {":date": "2025-01-01", ":because": ":discontinued"}
         }));
         let error = check_deprecate_disable(&disabled).unwrap_err().to_string();
         assert_eq!(
             error,
-            "demo has been disabled because it discontinued! It will be disabled on 2025-01-01."
+            "demo has been disabled because it is discontinued upstream! It was disabled on 2025-01-01."
+        );
+
+        // A reason the table does not know keeps its own words.
+        let other = cask(serde_json::json!({
+            "disable_args": {":because": ":some_other_reason"}
+        }));
+        assert_eq!(
+            deprecate_disable_message(&other).unwrap(),
+            "disabled because it some other reason!"
+        );
+        assert_eq!(
+            deprecate_disable_message(&cask(serde_json::json!({}))),
+            None
         );
     }
 
     #[test]
+    fn requirement_display() {
+        let mac = cask(serde_json::json!({
+            "depends_on_args": {":macos": {">=": [":ventura"]}}
+        }));
+        assert_eq!(
+            requirement_display_strings(&mac)
+                .into_iter()
+                .map(|(text, _)| text)
+                .collect::<Vec<_>>(),
+            ["macOS >= 13"]
+        );
+
+        // `depends_on macos: :any` carries no version to print.
+        let any = cask(serde_json::json!({"depends_on_args": {":macos": ":any"}}));
+        assert_eq!(requirement_display_strings(&any)[0].0, "macOS");
+
+        // An exact set joins with ` / `, and an arch is its own line.
+        let set = cask(serde_json::json!({
+            "depends_on_args": {":macos": [":ventura", ":sonoma"], ":arch": ":arm64"}
+        }));
+        assert_eq!(
+            requirement_display_strings(&set)
+                .into_iter()
+                .map(|(text, _)| text)
+                .collect::<Vec<_>>(),
+            ["arm64 architecture", "macOS == 13 / 14"]
+        );
+
+        // `depends_on arch: :intel` is `x86_64` once `ArchRequirement` has
+        // normalised it.
+        let intel = cask(serde_json::json!({"depends_on_args": {":arch": ":intel"}}));
+        assert_eq!(
+            requirement_display_strings(&intel)[0].0,
+            "x86_64 architecture"
+        );
+
+        assert!(requirement_display_strings(&cask(serde_json::json!({}))).is_empty());
+    }
+
+    #[test]
     fn outdated_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::cask::tests_support::config(tmp.path());
         let installed = InstalledCask {
             token: "demo".into(),
             version: "1.0".into(),
-            caskroom_path: PathBuf::from("/tmp/demo"),
+            caskroom_path: tmp.path().join("Caskroom/demo"),
             metadata_path: None,
         };
+        let plain = Greedy::default();
         assert!(is_outdated(
+            &cfg,
             &cask(serde_json::json!({"version": "1.1"})),
             &installed,
-            false
+            plain
         ));
         assert!(!is_outdated(
+            &cfg,
             &cask(serde_json::json!({"version": "1.0"})),
             &installed,
-            false
+            plain
         ));
-        // `version :latest` only counts as outdated when greedy.
+
+        // An `auto_updates` cask keeps itself current, so it counts only for
+        // `--greedy` or `--greedy-auto-updates`.
+        let auto = cask(serde_json::json!({"version": "1.1", "auto_updates": true}));
+        assert!(!is_outdated(&cfg, &auto, &installed, plain));
         assert!(!is_outdated(
-            &cask(serde_json::json!({"version": "latest"})),
+            &cfg,
+            &auto,
             &installed,
-            false
+            Greedy {
+                latest: true,
+                ..plain
+            }
         ));
         assert!(is_outdated(
-            &cask(serde_json::json!({"version": "latest"})),
+            &cfg,
+            &auto,
             &installed,
-            true
+            Greedy {
+                auto_updates: true,
+                ..plain
+            }
         ));
+        assert!(is_outdated(&cfg, &auto, &installed, Greedy::ALL));
+
+        // `version :latest` needs `--greedy-latest`; the checksum comparison
+        // then has neither a recorded sha nor a reachable url, which
+        // `checksumable?` treats as outdated.
+        let latest = cask(serde_json::json!({
+            "version": "latest",
+            "url_args": ["http://127.0.0.1:9/demo.zip"],
+        }));
+        assert!(!is_outdated(&cfg, &latest, &installed, plain));
+        assert!(!is_outdated(
+            &cfg,
+            &latest,
+            &installed,
+            Greedy {
+                auto_updates: true,
+                ..plain
+            }
+        ));
+        assert!(is_outdated(
+            &cfg,
+            &latest,
+            &installed,
+            Greedy {
+                latest: true,
+                ..plain
+            }
+        ));
+    }
+
+    #[test]
+    fn not_upgrading_wording() {
+        assert_eq!(
+            not_upgrading_reason(&cask(serde_json::json!({"version": "1.0"}))),
+            "the latest version is already installed"
+        );
+        assert_eq!(
+            not_upgrading_reason(&cask(serde_json::json!({"version": "latest"}))),
+            "the downloaded artifact has not changed"
+        );
     }
 
     #[test]

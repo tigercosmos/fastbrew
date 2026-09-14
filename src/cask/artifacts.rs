@@ -217,9 +217,19 @@ pub fn normalise_value(cfg: &Config, dirs: &CaskDirs, value: &Value) -> Value {
 /// `[":app", ["Demo.app", {..}]]` carries its arguments in one nested array
 /// (Ruby splats them into `Artifact.from_args`); a hash payload such as
 /// `[":uninstall", {..}]` is a single argument.
-fn spread(args: &[Value]) -> Vec<Value> {
+///
+/// The API also serializes the keyword arguments as a third element, next to
+/// the positional array: `[":app", ["Thorium.app"], {":target": "..."}]` and
+/// `[":generate_completions_from_executable", ["op", "completion"], {..}]`.
+/// Those trailing hashes belong in the same flat argument list, which is the
+/// shape `arg_str` and `target_option` read and the v2 JSON prints.
+pub fn spread(args: &[Value]) -> Vec<Value> {
     match args {
-        [Value::Array(items)] => items.clone(),
+        [Value::Array(items), rest @ ..] => {
+            let mut out = items.clone();
+            out.extend_from_slice(rest);
+            out
+        }
         other => other.to_vec(),
     }
 }
@@ -2173,6 +2183,43 @@ mod tests {
             artifact_target(&cfg, &dirs, &ctx, &specs[2]).unwrap(),
             PathBuf::from("/Library/Abs")
         );
+    }
+
+    /// The API serializes keyword arguments as a third element next to the
+    /// positional array (`[":app", ["Thorium.app"], {":target": ".."}]`), which
+    /// has to end up in the same flat argument list as the inline
+    /// `["Src.app", {":target": ".."}]` form.
+    #[test]
+    fn keyword_arguments_after_the_positional_array_are_splatted() {
+        let (_tmp, cfg, dirs) = fixture();
+        let mut cask: CaskEntry = serde_json::from_value(serde_json::json!({
+            "version": "1.0",
+            "raw_artifacts": [
+                [":app", ["Thorium.app"], {":target": "Thorium Browser.app"}],
+                [":generate_completions_from_executable", ["op", "completion"],
+                 {":shells": [":bash", ":zsh", ":fish"]}]
+            ]
+        }))
+        .unwrap();
+        cask.token = "demo".into();
+        let ctx = CaskContext::from_entry(&cfg, &cask);
+        let specs = artifact_specs(&cfg, &dirs, &cask);
+
+        let app = specs.iter().find(|s| s.kind == "app").unwrap();
+        assert_eq!(app.args[0].as_str(), Some("Thorium.app"));
+        assert_eq!(target_option(app), Some("Thorium Browser.app"));
+        assert_eq!(
+            artifact_target(&cfg, &dirs, &ctx, app).unwrap(),
+            dirs.appdir.join("Thorium Browser.app")
+        );
+
+        let completions = specs
+            .iter()
+            .find(|s| s.kind == "generate_completions_from_executable")
+            .unwrap();
+        let commands: Vec<&str> = completions.args.iter().filter_map(Value::as_str).collect();
+        assert_eq!(commands, ["op", "completion"]);
+        assert!(completions.args.iter().any(|v| v.get("shells").is_some()));
     }
 
     #[test]

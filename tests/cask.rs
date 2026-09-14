@@ -894,8 +894,11 @@ fn cli_uninstall_cask_honors_dry_run() {
     assert_eq!(tree(&caskroom), before, "the dry run changed the Caskroom");
 }
 
+/// `Install.print_dry_run_casks(..., include_installed: false)`: a dry run
+/// lists the casks it would install and stays silent about the ones that are
+/// already there, outdated or not.
 #[test]
-fn cli_install_cask_dry_run_reports_an_upgrade() {
+fn cli_install_cask_dry_run_lists_only_what_is_missing() {
     let Some((sandbox, version)) = cli_sandbox("rectangle") else {
         eprintln!("no cached Homebrew API file available; skipping");
         return;
@@ -904,30 +907,30 @@ fn cli_install_cask_dry_run_reports_an_upgrade() {
         eprintln!("skipping: the API index serves rectangle 1.0");
         return;
     }
+    let cask_opts = format!("--appdir={}", sandbox.home.join("Applications").display());
+    let dry_run = |sandbox: &support::Sandbox| {
+        let out = sandbox
+            .cmd()
+            .env("HOMEBREW_CASK_OPTS", &cask_opts)
+            .args(["install", "--cask", "--dry-run", "rectangle"])
+            .output()
+            .expect("run fastbrew");
+        assert!(
+            out.status.success(),
+            "install --dry-run failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        support::strip_ansi(&String::from_utf8_lossy(&out.stdout))
+    };
+
+    // Not installed: one cask, named by its full name.
+    assert_eq!(dry_run(&sandbox), "==> Would install 1 cask:\nrectangle\n");
+
+    // Installed (and outdated): nothing at all, and nothing touched.
     let app = fake_cli_install(&sandbox, "rectangle", "1.0", "Rectangle.app");
     let caskroom = sandbox.prefix.join("Caskroom/rectangle");
     let before = tree(&caskroom);
-
-    let out = sandbox
-        .cmd()
-        .env(
-            "HOMEBREW_CASK_OPTS",
-            format!("--appdir={}", sandbox.home.join("Applications").display()),
-        )
-        .args(["install", "--cask", "--dry-run", "rectangle"])
-        .output()
-        .expect("run fastbrew");
-    let stdout = support::strip_ansi(&String::from_utf8_lossy(&out.stdout));
-    assert!(
-        out.status.success(),
-        "install --dry-run failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        stdout.contains(&format!("Would upgrade rectangle 1.0 -> {version}")),
-        "{stdout}"
-    );
-
+    assert_eq!(dry_run(&sandbox), "");
     assert!(app.is_dir(), "the dry run removed {}", app.display());
     assert_eq!(tree(&caskroom), before, "the dry run changed the Caskroom");
 }

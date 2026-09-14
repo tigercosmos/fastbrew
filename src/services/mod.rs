@@ -19,6 +19,11 @@ use crate::output;
 /// `brew services`, used verbatim in Homebrew's messages (`Cli.bin`).
 pub const BIN: &str = "brew services";
 
+/// `Homebrew::Services::Cli.sudo_service_user`: the user `--sudo-service-user`
+/// named, which is also what makes an action operate on the system domain.
+/// `None` is the ordinary per-user service.
+pub type SudoUser<'a> = Option<&'a str>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceStatus {
     None,
@@ -478,19 +483,45 @@ fn report_running_or_loaded(cfg: &Config, svc: &KegService, running_status: &str
     false
 }
 
-fn copy_service_file(src: &Path, dest: &Path, sudo: bool) -> Result<()> {
+/// `Cli.install_service_file`: copy the keg's plist to its destination,
+/// rewriting `UserName` when `--sudo-service-user` named one.
+fn copy_service_file(
+    src: &Path,
+    dest: &Path,
+    service_name: &str,
+    sudo_user: SudoUser<'_>,
+) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
+    let sudo = sudo_user.is_some();
+    let mut data = std::fs::read(src)?;
+    if let Some(user) = sudo_user {
+        output::ohai(&format!("Setting username in {service_name} to: {user}"));
+        let text = String::from_utf8_lossy(&data).into_owned();
+        data = plist::set_plist_user(&text, user).into_bytes();
+    }
+
     if sudo && !launchd::is_root() {
+        // The destination is only writable by root, so the rewritten file goes
+        // through a temporary copy `cp` can read.
         let dir = dest.parent().unwrap_or(Path::new("/"));
-        run_sudo(&["/bin/mkdir", "-p", &dir.to_string_lossy()])?;
-        run_sudo(&["/bin/cp", &src.to_string_lossy(), &dest.to_string_lossy()])?;
-        run_sudo(&["/bin/chmod", "644", &dest.to_string_lossy()])?;
-        return Ok(());
+        let staged = std::env::temp_dir().join(format!("fastbrew-{service_name}.plist"));
+        keg::atomic_write(&staged, &data)?;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o644))?;
+        let result = (|| {
+            run_sudo(&["/bin/mkdir", "-p", &dir.to_string_lossy()])?;
+            run_sudo(&[
+                "/bin/cp",
+                &staged.to_string_lossy(),
+                &dest.to_string_lossy(),
+            ])?;
+            run_sudo(&["/bin/chmod", "644", &dest.to_string_lossy()])
+        })();
+        let _ = std::fs::remove_file(&staged);
+        return result;
     }
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let data = std::fs::read(src)?;
     keg::atomic_write(dest, &data)?;
     std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o644))?;
     Ok(())
@@ -526,7 +557,8 @@ fn remove_service_files(cfg: &Config, svc: &KegService, sudo: bool) {
     }
 }
 
-pub fn start(cfg: &Config, name: &str, sudo: bool) -> Result<()> {
+pub fn start(cfg: &Config, name: &str, sudo_user: SudoUser<'_>) -> Result<()> {
+    let sudo = sudo_user.is_some();
     let svc = find(cfg, name)?;
     if report_running_or_loaded(cfg, &svc, "started") {
         return Ok(());
@@ -539,7 +571,7 @@ pub fn start(cfg: &Config, name: &str, sudo: bool) -> Result<()> {
     // `install_service_file`: replace any stale copies, then install ours 0644.
     remove_service_files(cfg, &svc, sudo);
     let dest = svc.dest(cfg, sudo);
-    copy_service_file(&svc.plist_path, &dest, sudo)?;
+    copy_service_file(&svc.plist_path, &dest, &svc.label, sudo_user)?;
 
     let domain = launchd::domain_target(sudo || launchd::is_root());
     launchd::enable(&domain, &svc.label, sudo)?;
@@ -552,7 +584,8 @@ pub fn start(cfg: &Config, name: &str, sudo: bool) -> Result<()> {
 }
 
 /// `run`: bootstrap without enabling at login.
-pub fn run(cfg: &Config, name: &str, sudo: bool) -> Result<()> {
+pub fn run(cfg: &Config, name: &str, sudo_user: SudoUser<'_>) -> Result<()> {
+    let sudo = sudo_user.is_some();
     let svc = find(cfg, name)?;
     if report_running_or_loaded(cfg, &svc, "running") {
         return Ok(());
@@ -576,7 +609,8 @@ pub fn run(cfg: &Config, name: &str, sudo: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn stop(cfg: &Config, name: &str, sudo: bool) -> Result<()> {
+pub fn stop(cfg: &Config, name: &str, sudo_user: SudoUser<'_>) -> Result<()> {
+    let sudo = sudo_user.is_some();
     let svc = find(cfg, name)?;
     let info = svc.info(cfg);
 
@@ -643,22 +677,23 @@ pub fn stop(cfg: &Config, name: &str, sudo: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn restart(cfg: &Config, name: &str, sudo: bool) -> Result<()> {
+pub fn restart(cfg: &Config, name: &str, sudo_user: SudoUser<'_>) -> Result<()> {
     let svc = find(cfg, name)?;
     let info = svc.info(cfg);
     // `restart.rb`: a loaded-but-unregistered service was `run`, so re-`run` it.
     let rerun = info.loaded && !info.registered;
     if info.loaded {
-        stop(cfg, name, sudo)?;
+        stop(cfg, name, sudo_user)?;
     }
     if rerun {
-        run(cfg, name, sudo)
+        run(cfg, name, sudo_user)
     } else {
-        start(cfg, name, sudo)
+        start(cfg, name, sudo_user)
     }
 }
 
-pub fn kill(cfg: &Config, name: &str, sudo: bool) -> Result<()> {
+pub fn kill(cfg: &Config, name: &str, sudo_user: SudoUser<'_>) -> Result<()> {
+    let sudo = sudo_user.is_some();
     let svc = find(cfg, name)?;
     let info = svc.info(cfg);
     if !info.running {

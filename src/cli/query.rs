@@ -399,6 +399,15 @@ pub fn print_cask_info(ctx: &Ctx, cask: &CaskEntry) {
     if let Some(homepage) = &cask.homepage {
         println!("{}", output::format_url(homepage));
     }
+    // `DeprecateDisable.message` with its first letter upcased.
+    if let Some(message) = crate::cask::install::deprecate_disable_message(cask) {
+        let mut chars = message.chars();
+        let upcased = match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => message,
+        };
+        println!("{upcased}");
+    }
     match &installed_version {
         Some(v) => {
             let dir = cfg.caskroom().join(&cask.token).join(v);
@@ -416,6 +425,16 @@ pub fn print_cask_info(ctx: &Ctx, cask: &CaskEntry) {
             ))
         );
     }
+    // `Cask::Info.requirements_info`.
+    let requirements = crate::cask::install::requirement_display_strings(cask);
+    if !requirements.is_empty() {
+        output::ohai("Requirements");
+        let rendered: Vec<String> = requirements
+            .iter()
+            .map(|(text, satisfied)| fmt::install_status(text, *satisfied, installed))
+            .collect();
+        println!("Required: {}", rendered.join(", "));
+    }
     let artifacts = cask.artifacts();
     let shown: Vec<&crate::model::cask::Artifact> = artifacts
         .iter()
@@ -425,15 +444,22 @@ pub fn print_cask_info(ctx: &Ctx, cask: &CaskEntry) {
         let appdir = cask_appdir(cfg);
         output::ohai("Artifacts");
         for a in shown {
-            let summary = a
-                .args
+            // `Relocated#summarize`: `<source> -> <target>`, with the target
+            // left exactly as the cask spells it.
+            let args = crate::cask::artifacts::spread(&a.args);
+            let summary = args
                 .first()
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
                 .and_then(Value::as_str)
                 .map(|s| s.replace("$APPDIR", &appdir))
                 .unwrap_or_else(|| a.kind.clone());
-            println!("{summary} ({})", english_name(&a.kind));
+            let target = args
+                .iter()
+                .filter_map(Value::as_object)
+                .find_map(|m| m.get(":target").or_else(|| m.get("target")))
+                .and_then(Value::as_str)
+                .map(|t| format!(" -> {t}"))
+                .unwrap_or_default();
+            println!("{summary}{target} ({})", english_name(&a.kind));
         }
     }
     if let Some(caveats) = cask.caveats_text() {
@@ -583,8 +609,24 @@ fn cask_json(ctx: &Ctx, cask: &CaskEntry) -> Result<Value> {
         "installed".into(),
         installed.clone().map(Value::String).unwrap_or(Value::Null),
     );
-    let pinned = ctx.cfg.pinned_casks().join(&cask.token).is_symlink();
-    map.insert("pinned".into(), Value::Bool(pinned));
+    // `Cask#install_time`, from the latest `.metadata/<version>/<timestamp>`.
+    map.insert(
+        "installed_time".into(),
+        crate::cask::installed_cask(&ctx.cfg, &cask.token)
+            .and_then(|c| c.install_time())
+            .map(|t| Value::Number(t.into()))
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        "pinned".into(),
+        Value::Bool(crate::cask::is_pinned(&ctx.cfg, &cask.token)),
+    );
+    map.insert(
+        "pinned_version".into(),
+        crate::cask::pinned_version(&ctx.cfg, &cask.token)
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
     let index = ctx.index()?;
     let outdated = !outdated_ops::outdated_casks(
         &ctx.cfg,
@@ -1775,7 +1817,19 @@ pub fn outdated(ctx: &Ctx, args: &OutdatedArgs) -> Result<()> {
     let casks = if args.formula && !args.cask {
         vec![]
     } else {
-        outdated_ops::outdated_casks(&ctx.cfg, index, names.as_deref(), greedy)?
+        let mut all = outdated_ops::outdated_casks(&ctx.cfg, index, names.as_deref(), greedy)?;
+        // `Cask#outdated_version` splits the two greedy switches: a
+        // `version :latest` cask needs `--greedy-latest`, an `auto_updates`
+        // one `--greedy-auto-updates`, and `--greedy` covers both. The sweep
+        // above only knows the union, so narrow it back down here.
+        if greedy && !args.greedy {
+            all.retain(|o| match index.cask(&o.token) {
+                Some(cask) if cask.is_latest() => args.greedy_latest,
+                Some(cask) if cask.auto_updates => args.greedy_auto_updates,
+                _ => true,
+            });
+        }
+        all
     };
 
     if let Some(version) = &args.json {
@@ -1796,8 +1850,8 @@ pub fn outdated(ctx: &Ctx, args: &OutdatedArgs) -> Result<()> {
                 "name": o.token,
                 "installed_versions": [o.installed_version],
                 "current_version": o.current_version,
-                "pinned": false,
-                "pinned_version": Value::Null,
+                "pinned": crate::cask::is_pinned(&ctx.cfg, &o.token),
+                "pinned_version": crate::cask::pinned_version(&ctx.cfg, &o.token),
             })).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
@@ -1824,8 +1878,13 @@ pub fn outdated(ctx: &Ctx, args: &OutdatedArgs) -> Result<()> {
     }
     for o in &casks {
         if verbose {
+            // `Cask#outdated_info`: `token (installed) != current [pinned at x]`.
+            let pinned = match crate::cask::pinned_version(&ctx.cfg, &o.token) {
+                Some(v) => format!(" [pinned at {v}]"),
+                None => String::new(),
+            };
             println!(
-                "{} ({}) != {}",
+                "{} ({}) != {}{pinned}",
                 o.token, o.installed_version, o.current_version
             );
         } else {

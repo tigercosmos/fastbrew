@@ -114,7 +114,7 @@ pub fn format_warning(msg: &str) -> String {
 }
 
 pub fn opoo(msg: &str) {
-    eprintln!("{}", format_warning(msg));
+    puts_err(&format_warning(msg));
 }
 
 /// `Formatter.error`: `Error: msg` with a bold red label.
@@ -123,7 +123,17 @@ pub fn format_error(msg: &str) -> String {
 }
 
 pub fn onoe(msg: &str) {
-    eprintln!("{}", format_error(msg));
+    puts_err(&format_error(msg));
+}
+
+/// Ruby's `$stderr.puts`: text that already ends in a newline does not get a
+/// second one, so a multi-line message prints exactly its own lines.
+fn puts_err(text: &str) {
+    if text.ends_with('\n') {
+        eprint!("{text}");
+    } else {
+        eprintln!("{text}");
+    }
 }
 
 fn format_label(label: &str, msg: &str, color: &str) -> String {

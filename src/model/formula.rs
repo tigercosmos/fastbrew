@@ -59,6 +59,11 @@ pub struct FormulaEntry {
     pub versioned_formulae: Vec<String>,
     pub oldnames: Vec<String>,
     pub post_install_steps: Vec<Value>,
+    /// A third-party tap formula defines `post_install` in Ruby. The API never
+    /// carries this (core formulae are serialized into `post_install_steps`),
+    /// so it is only ever set by `rubylite`.
+    #[serde(default)]
+    pub post_install_defined: bool,
     pub no_autobump_args: Option<Value>,
     pub link_overwrite_paths: Vec<String>,
     pub pour_bottle_args: Option<Value>,

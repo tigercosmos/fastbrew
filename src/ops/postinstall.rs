@@ -14,19 +14,60 @@ use crate::keg::Keg;
 use crate::model::FormulaEntry;
 use crate::ops::steps::{self, StepContext};
 
-/// Run the formula's `post_install_steps` against an installed keg.
+/// Run the formula's post-install work against an installed keg.
+///
+/// Core formulae carry declarative `post_install_steps`; a third-party tap
+/// formula may instead define `post_install` in Ruby, which only the Ruby
+/// `brew` can run. Skipping it silently would leave the keg half-configured,
+/// so it is handed over (or reported) instead.
 pub fn run_post_install(cfg: &Config, formula: &FormulaEntry, keg: &Keg) -> Result<()> {
     let steps = steps::steps_from_value(&formula.post_install_steps);
     if steps.is_empty() {
+        if needs_ruby_post_install(formula) {
+            return delegate_post_install(cfg, formula);
+        }
         return Ok(());
     }
     let ctx = StepContext::new(cfg, formula, keg);
     steps::run(&ctx, &steps)
 }
 
-/// Whether the formula has any declarative post-install work.
+/// Whether the formula has post-install work of either kind.
 pub fn has_post_install(formula: &FormulaEntry) -> bool {
-    !formula.post_install_steps.is_empty()
+    !formula.post_install_steps.is_empty() || needs_ruby_post_install(formula)
+}
+
+/// A Ruby `post_install` with nothing declarative to run in its place.
+pub fn needs_ruby_post_install(formula: &FormulaEntry) -> bool {
+    formula.post_install_defined && formula.post_install_steps.is_empty()
+}
+
+/// Run `brew postinstall <formula>` for a Ruby `post_install`.
+///
+/// Without a `brew` to hand it to there is nothing fastbrew can do, so it says
+/// what is missing and makes the command exit 1. The keg stays: it is
+/// installed and linked, only its post-install step is outstanding.
+fn delegate_post_install(cfg: &Config, formula: &FormulaEntry) -> Result<()> {
+    let full = formula.full_name();
+    let args = [
+        std::ffi::OsString::from("postinstall"),
+        std::ffi::OsString::from(&full),
+    ];
+    let reason = format!("post-install of {full}");
+    match crate::delegate::run_brew(cfg, &args, &reason, false) {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(crate::error::Error::user(format!(
+            "`brew postinstall {full}` exited with {}.",
+            status.code().unwrap_or(-1)
+        ))),
+        Err(_) => {
+            crate::output::opoo(&format!(
+                "{full}'s post_install requires the Ruby formula DSL; run: brew postinstall {full}"
+            ));
+            crate::output::set_failed();
+            Ok(())
+        }
+    }
 }
 
 /// `Formula#install_etc_var`: copy `<keg>/.bottle/etc` and `<keg>/.bottle/var`

@@ -1,6 +1,5 @@
 //! `uninstall --cask [--zap]` (port of `Cask::Installer#uninstall` and `#zap`).
 
-use crate::api::index::Index;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::model::CaskEntry;
@@ -24,19 +23,14 @@ pub struct CaskUninstallOptions {
 
 pub fn uninstall_casks(
     cfg: &Config,
-    index: &Index,
-    tokens: &[String],
+    casks: &[CaskEntry],
     opts: CaskUninstallOptions,
 ) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
-    for token in tokens {
-        // An entry is nice to have (it carries the current artifact list) but a
-        // cask that has left the API must still be removable.
-        let entry = crate::resolve::resolve_cask(cfg, index, token).ok();
-        let cask_token = entry
-            .as_ref()
-            .map(|c| c.token.clone())
-            .unwrap_or_else(|| super::token_from_full_token(token).to_string());
+    for entry in casks {
+        // The resolved entry carries the current artifact list; a cask that has
+        // left the API resolves from the Caskroom, so it stays removable.
+        let cask_token = entry.token.clone();
 
         let Some(installed) = super::installed_cask(cfg, &cask_token) else {
             if opts.force {
@@ -53,7 +47,7 @@ pub fn uninstall_casks(
             Some(crate::keg::lock::lock_cask(cfg, &cask_token)?)
         };
         let dirs = CaskDirs::read_or_resolve(cfg, &installed.config_path(), &[]);
-        if let Err(error) = uninstall_installed_cask(cfg, &dirs, &installed, entry.as_ref(), opts) {
+        if let Err(error) = uninstall_installed_cask(cfg, &dirs, &installed, Some(entry), opts) {
             errors.push(error.to_string());
         }
     }

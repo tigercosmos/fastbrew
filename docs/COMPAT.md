@@ -371,6 +371,27 @@ and left-pads that field with zeroes to at least four hex digits
 (`0083;...` becomes `0183;...`). Bit `0x0040` is the separate user-approval
 flag that upgrades inherit; fastbrew does not set it.
 
+`info --cask` prints, after the homepage, `DeprecateDisable.message` with its
+first letter upcased (`Deprecated because it is discontinued upstream! It was
+disabled on <date>.`, the tense following whether the date has passed, the
+reason taken from `CASK_DEPRECATE_DISABLE_REASONS`), and after `From:` an
+`==> Requirements` section whose single `Required:` line lists
+`CaskDependent#requirements` in their order — the architectures
+(`x86_64 architecture`, with `:intel`/`:arm` normalised to their 64-bit
+names), then `macos`, then `maximum_macos`, each as
+`MacOSRequirement#display_s` spells it (`macOS >= 13`, `macOS == 13 / 14`, or
+a bare `macOS` when no version is given).
+
+Pinning a cask (`brew pin --cask`, Homebrew 6) is a relative symlink
+`$PREFIX/var/homebrew/pinned_casks/<token>` -> `Caskroom/<token>/<version>`
+(`Cask#pin`). `pinned?` needs it to resolve, `pinned_version` is the basename
+it points at, and `unpin` drops it even when it dangles. `Cask::Upgrade` never
+upgrades a pinned cask and reports `Not upgrading N pinned package(s):`
+followed by `<full_name> <installed_version>` — `ofail` when casks were named,
+`opoo` for the sweep. `outdated --verbose` appends `[pinned at <version>]`.
+Pinning a cask with `auto_updates true` warns that it may update itself
+anyway.
+
 Uninstall directives run in `AbstractUninstall::ORDERED_DIRECTIVES` order:
 `early_script`, `launchctl`, `quit`, `signal`, `login_item`, `kext`, `script`,
 `pkgutil`, `delete`, `trash`, `rmdir`. `uninstall` runs all but `rmdir`, then
@@ -392,10 +413,16 @@ and reinstalls the predecessor's artifacts (`#restore_backup`,
 `.upgrading` directory is a version in flight, not an installed one, and is
 skipped when discovering installed casks.
 
-`--dry-run` never writes: `install --cask` prints
-`Would install cask <token> <version>`, or `Would upgrade <token> <old> -> <new>`
-when the cask is installed and outdated; `upgrade --cask` prints
-`==> Would upgrade N outdated packages:` (`Cask::Upgrade.show_upgrade_summary`).
+`--dry-run` never writes. `install --cask` prints
+`==> Would install N cask(s):` followed by the full names of the casks that
+are *not* installed on one space-separated line, then
+`==> Would install N dependencies for <full name>:` per cask with an
+uninstalled dependency (`Install.print_dry_run_casks` with
+`include_installed: false`); an already-installed cask produces no output at
+all, even when it is outdated. `upgrade --cask` prints
+`==> Would upgrade N outdated packages:` (`Cask::Upgrade.show_upgrade_summary`)
+followed by `<full name> <old> -> <new>` per cask. `brew reinstall` has no
+`--dry-run` switch, so fastbrew's `reinstall --cask -n` wording is its own.
 Homebrew's `brew uninstall` has no `--dry-run` switch, so fastbrew's cask wording
 is its own: `==> Would uninstall Cask <token>`, `Would remove <kind> '<path>'`
 per artifact, then `==> Would purge files for version <version> of Cask <token>`

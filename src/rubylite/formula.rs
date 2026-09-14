@@ -221,6 +221,10 @@ impl Parser<'_> {
                 let what = line.text.trim_start_matches("def").trim();
                 if what.starts_with("install") {
                     self.has_install = true;
+                } else if what.starts_with("post_install") {
+                    // Only the Ruby `brew` can run this; `ops::postinstall`
+                    // hands it over rather than silently skipping it.
+                    self.entry.post_install_defined = true;
                 } else if what.starts_with("caveats")
                     && let Some(text) = lines[open..=close].iter().find_map(|l| l.heredocs.first())
                 {

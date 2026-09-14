@@ -429,7 +429,7 @@ pub fn tap_with_outcome(
             "Tapping {} is no longer typically necessary.\n\
              Add {} if you are sure you need it for contributing to Homebrew.",
             tap.name(),
-            output::underline("--force")
+            output::green("--force")
         )));
     }
 
@@ -509,7 +509,24 @@ pub fn untap(cfg: &Config, name: &str, force: bool) -> Result<()> {
     let tap = Tap::parse(name).ok_or_else(|| Error::user(format!("Invalid tap name: '{name}'")))?;
     let path = tap.path(cfg);
     if !path.is_dir() {
-        return Err(Error::user(format!("No available tap {}.\n", tap.name())));
+        // `TapUnavailableError#initialize`: the core taps are offered
+        // `brew tap --force`, everything else `brew tap-new`.
+        let command = if tap.is_core() || tap.is_cask() {
+            format!("brew tap --force {}", tap.name())
+        } else {
+            format!("brew tap-new {}", tap.name())
+        };
+        let what = if tap.is_core() || tap.is_cask() {
+            format!("tap {}", tap.name())
+        } else {
+            format!("create a new {} tap", tap.name())
+        };
+        return Err(Error::user(format!(
+            "No available tap {}.\nRun {} to {}!\n",
+            tap.name(),
+            output::green(&command),
+            what
+        )));
     }
 
     if !force {
@@ -546,15 +563,37 @@ pub fn untap(cfg: &Config, name: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Returns the taps whose HEAD moved.
-pub fn update_all(cfg: &Config, quiet: bool) -> Result<Vec<Tap>> {
+/// What one `update` run did to the installed taps.
+#[derive(Debug, Default)]
+pub struct TapUpdates {
+    /// Taps whose `HEAD` moved.
+    pub changed: Vec<Tap>,
+    /// `cmd/update.sh`'s `Fetching <dir> failed!` lines, in tap order. A tap
+    /// that could not be fetched is a failure of the whole `update`, so these
+    /// have to survive the parallel pull.
+    pub failures: Vec<String>,
+}
+
+pub fn update_all(cfg: &Config, quiet: bool) -> TapUpdates {
     let taps = installed_taps(cfg);
-    let mut changed: Vec<Tap> = taps
+    let results: Vec<(Tap, Result<Option<Tap>>)> = taps
         .par_iter()
-        .filter_map(|tap| update_one(cfg, tap, quiet).ok().flatten())
+        .map(|tap| (tap.clone(), update_one(cfg, tap, quiet)))
         .collect();
-    changed.sort_by_key(Tap::name);
-    Ok(changed)
+    let mut updates = TapUpdates::default();
+    for (tap, result) in results {
+        match result {
+            Ok(Some(moved)) => updates.changed.push(moved),
+            Ok(None) => {}
+            Err(error) => {
+                let _ = tap;
+                updates.failures.push(error.to_string());
+            }
+        }
+    }
+    updates.changed.sort_by_key(Tap::name);
+    updates.failures.sort();
+    updates
 }
 
 /// Fetch and fast-forward one tap; `Some(tap)` when its `HEAD` moved.
@@ -571,14 +610,14 @@ pub fn update_one(cfg: &Config, tap: &Tap, quiet: bool) -> Result<Option<Tap>> {
     }
     let fetched = git(&path, &fetch)?;
     if !fetched.status.success() {
-        if !quiet {
-            output::opoo(&format!(
-                "Failed to update tap {}: {}",
-                tap.name(),
-                String::from_utf8_lossy(&fetched.stderr).trim()
-            ));
+        // `cmd/update.sh` reprints the git errors on stderr and records
+        // `Fetching <dir> failed!`, which `update` reports with `onoe` and
+        // which makes the whole command fail.
+        let errors = String::from_utf8_lossy(&fetched.stderr);
+        if !quiet && !errors.trim().is_empty() {
+            eprintln!("{}", errors.trim_end());
         }
-        return Ok(None);
+        return Err(Error::user(format!("Fetching {} failed!", path.display())));
     }
 
     // Fast-forward only: never rewrite a tap the user is working in.

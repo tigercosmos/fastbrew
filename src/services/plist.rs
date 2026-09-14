@@ -932,6 +932,54 @@ pub fn install_service_files(
     Ok(())
 }
 
+/// `Cli.install_service_file`: set `UserName` in the plist that is copied to
+/// the launch daemon directory, so `--sudo-service-user` actually runs the
+/// service as that user.
+///
+/// Homebrew round-trips the file through the `plist` gem, which sorts the
+/// dictionary by key; the same sorted position is what this insert uses, so
+/// the result is byte-identical to Homebrew's.
+pub fn set_plist_user(text: &str, user: &str) -> String {
+    const KEY: &str = "\t<key>UserName</key>";
+    let entry = format!("{KEY}\n\t<string>{}</string>\n", escape_html(user));
+    let mut out = String::with_capacity(text.len() + entry.len());
+    let mut lines = text.lines().peekable();
+    let mut written = false;
+    while let Some(line) = lines.next() {
+        // Replace the value of an existing top-level `UserName`.
+        if !written && line == KEY {
+            out.push_str(&entry);
+            written = true;
+            // Its value is the single line that follows.
+            lines.next();
+            continue;
+        }
+        if !written
+            && let Some(key) = top_level_key(line)
+            && key.as_str() > "UserName"
+        {
+            out.push_str(&entry);
+            written = true;
+        }
+        if !written && line == "</dict>" {
+            out.push_str(&entry);
+            written = true;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The key of a `\t<key>X</key>` line at the top level of the plist's dict.
+fn top_level_key(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("\t<key>")?;
+    if line.starts_with("\t\t") {
+        return None;
+    }
+    rest.strip_suffix("</key>").map(str::to_string)
+}
+
 fn write_0644(path: &std::path::Path, data: &[u8]) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     crate::keg::atomic_write(path, data)?;
@@ -1058,6 +1106,52 @@ mod tests {
         assert_eq!(systemd_quote("a\"b\\c"), "\"a\\\"b\\\\c\"");
         assert_eq!(sh_quote("daemon off;"), "'daemon off;'");
         assert_eq!(sh_quote("/opt/x"), "/opt/x");
+    }
+
+    /// `--sudo-service-user` has to reach the plist that is installed, or the
+    /// service runs as root instead of the user that was asked for.
+    #[test]
+    fn sudo_service_user_lands_in_the_plist() {
+        let cfg = test_config();
+        let goldens = goldens();
+        let mut entry = goldens["black"].entry.clone();
+        entry.name = "black".into();
+        let plist = ServiceDef::from_formula(&cfg, &entry)
+            .unwrap()
+            .to_plist(&cfg);
+        assert!(!plist.contains("UserName"));
+
+        let owned = set_plist_user(&plist, "alice");
+        assert!(
+            owned.contains("\t<key>UserName</key>\n\t<string>alice</string>\n"),
+            "{owned}"
+        );
+        // The `plist` gem sorts the dictionary, so the key lands between the
+        // ones either side of it and the rest of the file is untouched.
+        let keys: Vec<&str> = owned.lines().filter_map(top_level_key_ref).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted, "the dictionary stayed sorted: {keys:?}");
+        assert!(keys.contains(&"UserName"));
+        assert_eq!(owned.lines().count(), plist.lines().count() + 2);
+        assert!(owned.ends_with("</plist>\n"), "{owned}");
+
+        // Setting it again replaces the value rather than adding a second key.
+        let again = set_plist_user(&owned, "bob");
+        assert!(again.contains("\t<string>bob</string>\n"), "{again}");
+        assert!(!again.contains("alice"), "{again}");
+        assert_eq!(again.matches("<key>UserName</key>").count(), 1);
+
+        // The name is escaped like every other plist string.
+        let escaped = set_plist_user(&plist, "a&b");
+        assert!(escaped.contains("<string>a&amp;b</string>"), "{escaped}");
+    }
+
+    fn top_level_key_ref(line: &str) -> Option<&str> {
+        if line.starts_with("\t\t") {
+            return None;
+        }
+        line.strip_prefix("\t<key>")?.strip_suffix("</key>")
     }
 
     #[test]
