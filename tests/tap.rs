@@ -459,6 +459,16 @@ fn taps_oven_sh_bun_and_reads_it() {
     // The formula count moves with the tap, so only its shape is asserted.
     assert!(tap_info.contains(" formulae\n"), "{tap_info}");
 
+    // bun ships no bottle, so even a dry run is the Ruby `brew`'s job and the
+    // delegation names why.
+    let out = sandbox.run(&["install", "--dry-run", "oven-sh/bun/bun"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = support::strip_ansi(&String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stderr.contains("refusing to delegate to brew (bun: no bottle available!)"),
+        "{stderr}"
+    );
+
     let out = sandbox.run(&["untap", "oven-sh/bun"]);
     assert!(
         out.status.success(),

@@ -449,6 +449,228 @@ fn a_tap_qualified_cask_is_the_one_that_is_installed() {
     assert_eq!(env.stdout(&["list", "--cask"]), "");
 }
 
+// ------------------------------------------------------- real casks (network)
+
+/// The three container shapes a user meets, driven through the CLI: a dmg
+/// with an app, a zip with a binary and generated completions, and a zip of
+/// fonts. Gated on `FASTBREW_TEST_NETWORK=1`.
+#[test]
+fn installs_real_casks_end_to_end() {
+    if !support::network_tests_enabled() {
+        eprintln!("set FASTBREW_TEST_NETWORK=1 to run network tests; skipping");
+        return;
+    }
+    let env = env_or_skip!();
+    let index = support::api_index().expect("the API index");
+    let rectangle = index
+        .cask("rectangle")
+        .and_then(|c| c.version)
+        .expect("rectangle is in the index");
+    let op = index
+        .cask("1password-cli")
+        .and_then(|c| c.version)
+        .expect("1password-cli is in the index");
+    let font = index
+        .cask("font-fira-code")
+        .and_then(|c| c.version)
+        .expect("font-fira-code is in the index");
+
+    // --- dmg -> app -------------------------------------------------------
+    let out = env.run(&["install", "--cask", "rectangle"]);
+    assert!(
+        out.status.success(),
+        "install rectangle: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let app = env.appdir().join("Rectangle.app");
+    assert!(
+        app.join("Contents/Info.plist").is_file(),
+        "{} is missing",
+        app.display()
+    );
+    // The staged directory keeps a symlink to where the app went.
+    let staged = env.caskroom("rectangle").join(&rectangle);
+    assert_eq!(
+        std::fs::read_link(staged.join("Rectangle.app")).expect("the staged symlink"),
+        app
+    );
+
+    // --- zip -> binary plus generated completions -------------------------
+    let out = env.run(&["install", "--cask", "1password-cli"]);
+    assert!(
+        out.status.success(),
+        "install 1password-cli: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let binary = env.sandbox.prefix.join("bin/op");
+    assert!(binary.is_symlink(), "{} is not a symlink", binary.display());
+    for completion in [
+        "etc/bash_completion.d/op",
+        "share/zsh/site-functions/_op",
+        "share/fish/vendor_completions.d/op.fish",
+    ] {
+        let path = env.sandbox.prefix.join(completion);
+        assert!(
+            path.is_file() && path.metadata().expect("stat").len() > 0,
+            "{} was not generated",
+            path.display()
+        );
+    }
+
+    // --- zip -> fonts -----------------------------------------------------
+    let out = env.run(&["install", "--cask", "font-fira-code"]);
+    assert!(
+        out.status.success(),
+        "install font-fira-code: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let fonts: Vec<String> = std::fs::read_dir(env.fontdir())
+        .expect("read the font directory")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        fonts.iter().any(|f| f.starts_with("FiraCode")),
+        "the fonts were not moved into {}: {fonts:?}",
+        env.fontdir().display()
+    );
+
+    // --- what the read-only commands now say ------------------------------
+    let listed = env.stdout(&["list", "--cask"]);
+    for token in ["1password-cli", "font-fira-code", "rectangle"] {
+        assert!(listed.lines().any(|l| l == token), "{listed}");
+    }
+    let versions = env.stdout(&["list", "--cask", "--versions"]);
+    assert!(
+        versions
+            .lines()
+            .any(|l| l == format!("rectangle {rectangle}")),
+        "{versions}"
+    );
+    assert!(
+        versions.lines().any(|l| l == format!("1password-cli {op}")),
+        "{versions}"
+    );
+    assert!(
+        versions
+            .lines()
+            .any(|l| l == format!("font-fira-code {font}")),
+        "{versions}"
+    );
+
+    let info = env.stdout(&["info", "--cask", "rectangle"]);
+    assert!(
+        info.starts_with(&format!(
+            "==> rectangle (Rectangle): {rectangle} (auto_updates)\n"
+        )),
+        "{info}"
+    );
+    assert!(info.contains("\nInstalled\n"), "{info}");
+    assert!(
+        info.contains(&format!("Caskroom/rectangle/{rectangle} (")),
+        "{info}"
+    );
+    assert!(info.contains("Rectangle.app (App)"), "{info}");
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&env.stdout(&["info", "--json=v2", "--cask", "rectangle"]))
+            .expect("json");
+    let cask = &doc["casks"][0];
+    assert_eq!(cask["token"], serde_json::json!("rectangle"));
+    assert_eq!(cask["installed"], serde_json::json!(rectangle));
+    assert_eq!(cask["outdated"], serde_json::json!(false));
+    assert_eq!(cask["pinned"], serde_json::json!(false));
+    assert!(
+        cask["installed_time"].as_i64().unwrap_or(0) > 0,
+        "installed_time comes from the metadata timestamp: {cask}"
+    );
+
+    // Everything is current, so nothing is outdated.
+    assert_eq!(env.stdout(&["outdated", "--cask"]), "");
+
+    // --- installing again ------------------------------------------------
+    let again = env.combined(&["install", "--cask", "rectangle"]);
+    assert!(
+        again.contains("Not upgrading rectangle, the latest version is already installed"),
+        "{again}"
+    );
+    // `--force` replaces it, leaving one staged version behind.
+    let out = env.run(&["install", "--cask", "--force", "rectangle"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        entries(&env.caskroom("rectangle")),
+        [".metadata", &rectangle]
+    );
+    assert!(backup_leftovers(&env.caskroom("rectangle")).is_empty());
+
+    let out = env.run(&["reinstall", "--cask", "rectangle"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(app.join("Contents/Info.plist").is_file());
+
+    // --- errors -----------------------------------------------------------
+    // An unknown token is `Cask::CaskUnavailableError`; Homebrew's
+    // "Did you mean" belongs to formulae, casks get a similar-name search
+    // fastbrew does not run.
+    let out = env.run(&["install", "--cask", "rectangl"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)).trim(),
+        "Error: Cask 'rectangl' is unavailable: No Cask with this name exists."
+    );
+    let out = env.run(&["uninstall", "--cask", "firefox"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)).trim(),
+        "Error: Cask 'firefox' is not installed."
+    );
+
+    // --- uninstall, and --zap -------------------------------------------
+    let out = env.run(&["uninstall", "--cask", "rectangle"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!app.exists(), "{} survived", app.display());
+    assert!(!env.caskroom("rectangle").exists());
+
+    // 1password-cli zaps `~/.config/op`, inside the sandbox HOME.
+    let zapped = env.sandbox.home.join(".config/op");
+    std::fs::create_dir_all(&zapped).expect("mkdir");
+    std::fs::write(zapped.join("config"), b"{}").expect("write");
+    let out = env.run(&["uninstall", "--cask", "--zap", "1password-cli"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!binary.exists() && !binary.is_symlink());
+    assert!(!env.caskroom("1password-cli").exists());
+    assert!(!zapped.exists(), "zap left {} behind", zapped.display());
+    // The trashed directory landed in the sandbox home's Trash.
+    assert!(env.sandbox.home.join(".Trash").is_dir());
+
+    let out = env.run(&["uninstall", "--cask", "font-fira-code"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !env.fontdir().join("FiraCode-Regular.ttf").exists(),
+        "the fonts were not removed"
+    );
+    assert_eq!(env.stdout(&["list", "--cask"]), "");
+}
+
 // ------------------------------------------------------- cask edge cases
 
 /// `--appdir` on the command line beats `HOMEBREW_CASK_OPTS`, and the layers
@@ -845,6 +1067,84 @@ end
             "/"
         ]
     );
+}
+
+/// `depends_on formula:` installs the formula first (`Installer#satisfy_cask
+/// _and_formula_dependencies`), and the dry run lists it without installing
+/// anything. The formula itself has to be poured, so this needs the network.
+#[test]
+fn a_cask_installs_the_formula_it_depends_on() {
+    if !support::network_tests_enabled() {
+        eprintln!("set FASTBREW_TEST_NETWORK=1 to run network tests; skipping");
+        return;
+    }
+    let env = env_or_skip!();
+    let token = "fastbrew-needs-hello";
+    let app = "FastbrewNeedsHello.app";
+    let url = fixture_url(token, "1.0");
+    let sha = env.seed_app_zip(&url, app, "1.0");
+    env.write_cask(
+        token,
+        &app_cask_rb(
+            token,
+            "1.0",
+            &url,
+            &sha,
+            app,
+            "  depends_on formula: \"hello\"\n",
+        ),
+    );
+
+    // The dry run names the dependency and installs nothing.
+    let plan = env.combined(&["install", "--cask", "--dry-run", token]);
+    assert_eq!(
+        plan,
+        format!(
+            "==> Would install 1 cask:\nfixture/casks/{token}\n\
+             ==> Would install 1 dependency for fixture/casks/{token}:\nhello\n"
+        )
+    );
+    assert!(!env.caskroom(token).exists());
+    assert!(!env.sandbox.prefix.join("Cellar/hello").exists());
+
+    let out = env.run(&["install", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = support::strip_ansi(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ));
+    assert!(
+        combined.contains("==> Installing dependencies: hello"),
+        "{combined}"
+    );
+    assert!(
+        env.sandbox.prefix.join("opt/hello/bin/hello").exists(),
+        "the formula dependency was not installed"
+    );
+    assert!(env.appdir().join(app).is_dir());
+
+    // The receipt records the dependency the way `Cask::Tab` does.
+    let receipt: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(env.caskroom(token).join(".metadata/INSTALL_RECEIPT.json"))
+            .expect("receipt"),
+    )
+    .expect("json");
+    assert_eq!(
+        receipt["runtime_dependencies"]["formula"],
+        serde_json::json!([{"full_name": "hello", "declared_directly": true}])
+    );
+
+    // A second run sees the dependency installed and says nothing about it.
+    let plan = env.combined(&["install", "--cask", "--dry-run", token]);
+    assert_eq!(plan, "", "an installed cask plans nothing:\n{plan}");
+
+    let _ = env.run(&["uninstall", "--cask", token]);
+    let _ = env.run(&["uninstall", "hello"]);
 }
 
 // ------------------------------------------------------------------ taps
