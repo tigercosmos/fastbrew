@@ -139,7 +139,7 @@ pub fn install_formulae_with(
     let mut failed: HashSet<String> = HashSet::new();
     let mut headed: HashSet<String> = HashSet::new();
     let mut messages: Vec<(String, caveats::Caveats)> = Vec::new();
-    let mut link_failed = false;
+    let mut link_failures: Vec<String> = Vec::new();
 
     for item in &plan.items {
         if let Some(error) = poured.get(item.name()).and_then(|r| r.as_ref().err()) {
@@ -173,8 +173,8 @@ pub fn install_formulae_with(
 
         match finish_item(cfg, index, &plan, item, &downloads, opts) {
             Ok(outcome) => {
-                if outcome.link_failed {
-                    link_failed = true;
+                if let Some(block) = outcome.link_failed {
+                    link_failures.push(block);
                 }
                 if !outcome.caveats.is_empty() {
                     messages.push((item.name().to_string(), outcome.caveats));
@@ -194,19 +194,22 @@ pub fn install_formulae_with(
     finish_run(cfg, index, &plan, opts)?;
     print_messages(&messages);
 
+    // Homebrew `ofail`s these: it prints the block and exits 1. Returning them
+    // as one error prints each block exactly once and keeps the exit status.
+    let mut blocks = link_failures;
     if !failed.is_empty() {
-        return Err(Error::user(format!(
+        let mut names: Vec<String> = failed.into_iter().collect();
+        names.sort();
+        blocks.push(format!(
             "Failed to install {}",
-            resolve::to_sentence(&failed.into_iter().collect::<Vec<_>>(), "and")
-        )));
-    }
-    if link_failed {
-        // The kegs stay installed but the run exits 1, like Homebrew's `ofail`.
-        return Err(Error::user(
-            "The `brew link` step did not complete successfully".to_string(),
+            resolve::to_sentence(&names, "and")
         ));
     }
-    Ok(())
+    if blocks.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::user(blocks.join("\n")))
+    }
 }
 
 /// `fetch`: download manifests and blobs only.
@@ -548,7 +551,8 @@ fn openjdk_dependency(tab: &BottleTab) -> Option<String> {
 
 struct Outcome {
     caveats: caveats::Caveats,
-    link_failed: bool,
+    /// Homebrew's `brew link` failure block, when linking did not work out.
+    link_failed: Option<String>,
 }
 
 /// Steps 6 and 9-14 of `docs/DESIGN.md` 6 for one keg.
@@ -599,7 +603,7 @@ fn finish_item(
             let _ = keg::link::unlink(cfg, existing, LinkOptions::default());
         }
     }
-    let mut link_failed = false;
+    let mut link_failed: Option<String> = None;
     if should_link(cfg, item) {
         // A stale record from a previous keg would block the link.
         if cfg.linked_record(item.name()).is_symlink() && !keg.is_linked(cfg) {
@@ -611,16 +615,22 @@ fn finish_item(
             verbose: opts.verbose,
         };
         if let Err(e) = keg::link::link(cfg, &keg, &item.formula.link_overwrite_paths, link_opts) {
-            output::onoe("The `brew link` step did not complete successfully");
-            println!(
-                "The formula built, but is not symlinked into {}",
-                cfg.prefix.display()
+            // `FormulaInstaller#link` reports the conflict and carries on: the
+            // keg stays installed, and the run fails at the end.
+            link_failed = Some(
+                [
+                    "The `brew link` step did not complete successfully".to_string(),
+                    format!(
+                        "The formula built, but is not symlinked into {}",
+                        cfg.prefix.display()
+                    ),
+                    e.to_string(),
+                    String::new(),
+                    "You can try again using:".to_string(),
+                    format!("  brew link {}", item.name()),
+                ]
+                .join("\n"),
             );
-            println!("{e}");
-            println!();
-            println!("You can try again using:");
-            println!("  brew link {}", item.name());
-            link_failed = true;
         }
     }
 

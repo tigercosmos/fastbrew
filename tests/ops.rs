@@ -461,6 +461,51 @@ fn installs_jq_with_its_dependency_and_writes_homebrew_receipts() {
 }
 
 #[test]
+fn a_link_conflict_keeps_the_keg_and_fails_the_run() {
+    let Some(sb) = sandbox() else { return };
+    if !network() {
+        return;
+    }
+    // Something that is not ours sits where `bin/jq` would go.
+    std::fs::write(sb.prefix.join("bin/jq"), b"not jq\n").unwrap();
+
+    let out = sb.fails(&["install", "jq"]);
+    assert!(
+        out.contains("The `brew link` step did not complete successfully"),
+        "{out}"
+    );
+    assert!(out.contains("Could not symlink bin/jq"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "Target {}\nalready exists. You may want to remove it:",
+            sb.prefix.join("bin/jq").display()
+        )),
+        "{out}"
+    );
+    assert!(out.contains("  brew link --overwrite jq"), "{out}");
+    assert!(
+        out.contains("You can try again using:\n  brew link jq"),
+        "{out}"
+    );
+    // The keg is installed all the same, and the foreign file is untouched.
+    let version = api_version(&sb, "jq");
+    assert!(sb.keg("jq", &version).join("bin/jq").is_file());
+    assert_eq!(
+        std::fs::read_to_string(sb.prefix.join("bin/jq")).unwrap(),
+        "not jq\n"
+    );
+
+    // `--overwrite` deletes the conflicting file and links the keg.
+    sb.ok(&["uninstall", "jq"]);
+    std::fs::write(sb.prefix.join("bin/jq"), b"not jq\n").unwrap();
+    sb.ok(&["install", "--overwrite", "jq"]);
+    assert_eq!(
+        std::fs::read_link(sb.prefix.join("bin/jq")).unwrap(),
+        PathBuf::from(format!("../Cellar/jq/{version}/bin/jq"))
+    );
+}
+
+#[test]
 fn refuses_to_uninstall_a_dependency_unless_told_to() {
     let Some(sb) = sandbox() else { return };
     if !network() {
