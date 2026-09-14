@@ -92,9 +92,9 @@ pub fn cleanup(cfg: &Config, index: &Index, names: &[String], opts: &CleanupOpti
 
     if names.is_empty() {
         let mut installed = keg::installed_formula_names(cfg);
-        // A rack whose only content is a staging directory holds no keg, so
-        // `installed_formula_names` does not report it.
-        for name in racks_with_staging(cfg) {
+        // A rack whose only content is a staging directory or a reinstall
+        // backup holds no keg, so `installed_formula_names` does not report it.
+        for name in racks_with_leftovers(cfg) {
             if !installed.contains(&name) {
                 installed.push(name);
             }
@@ -183,8 +183,8 @@ fn print_no_install_cleanup_disable_message(cfg: &Config) {
 /// the same way rather than aborting everything.
 fn cleanup_formula(sweeper: &mut Sweeper<'_>, index: &Index, name: &str) {
     let eligible = eligible_kegs_for_cleanup(sweeper.cfg, index, name, sweeper.quiet);
-    let staging = staging_dirs(sweeper.cfg, name);
-    let _lock = if (eligible.is_empty() && staging.is_empty()) || sweeper.opts.dry_run {
+    let leftovers = leftover_dirs(sweeper.cfg, name);
+    let _lock = if (eligible.is_empty() && leftovers.is_empty()) || sweeper.opts.dry_run {
         // A dry run removes nothing, so it needs no lock.
         None
     } else {
@@ -217,24 +217,26 @@ fn cleanup_formula(sweeper: &mut Sweeper<'_>, index: &Index, name: &str) {
             Ok(())
         });
     }
-    for path in staging {
+    for path in leftovers {
         let target = path.clone();
         sweeper.remove(&path, move || std::fs::remove_dir_all(&target));
     }
     // `remove_dir` only succeeds on an empty directory, so a rack that held
-    // nothing but staging leftovers goes away with them.
+    // nothing but leftovers goes away with them.
     let _ = std::fs::remove_dir(sweeper.cfg.rack(name));
     cleanup_formula_downloads(sweeper, index, name);
 }
 
-/// Extraction staging directories a killed install left in a rack.
+/// Directories a killed install or reinstall left in a rack.
 ///
 /// `bottle::extract` unpacks into `$CELLAR/<name>/.fastbrew-<uuid>` and removes
-/// it on the way out; a process that dies mid-extract never gets to. Homebrew
-/// has no equivalent, so `cleanup` has to sweep them itself. Callers hold the
-/// rack's formula lock, which keeps the sweep off a running install's staging
-/// directory.
-fn staging_dirs(cfg: &Config, name: &str) -> Vec<PathBuf> {
+/// it on the way out, and a replacing pour keeps the keg it displaced at
+/// `$CELLAR/<name>/<version>.reinstall` until the install finishes; a process
+/// that dies in between never gets to clear either. Homebrew sweeps the second
+/// kind in `Cleanup#cleanup_reinstall_kegs` and has no equivalent of the first.
+/// Callers hold the rack's formula lock, which keeps the sweep off a running
+/// install's directories.
+fn leftover_dirs(cfg: &Config, name: &str) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(cfg.rack(name)) else {
         return vec![];
     };
@@ -243,17 +245,17 @@ fn staging_dirs(cfg: &Config, name: &str) -> Vec<PathBuf> {
         .map(|e| e.path())
         .filter(|p| {
             p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with(".fastbrew-"))
+                && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    n.starts_with(".fastbrew-") || crate::bottle::extract::is_backup_name(n)
+                })
         })
         .collect();
     dirs.sort();
     dirs
 }
 
-/// Rack names holding an extraction staging directory.
-fn racks_with_staging(cfg: &Config) -> Vec<String> {
+/// Rack names holding a staging directory or a reinstall backup.
+fn racks_with_leftovers(cfg: &Config) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(&cfg.cellar) else {
         return vec![];
     };
@@ -264,7 +266,7 @@ fn racks_with_staging(cfg: &Config) -> Vec<String> {
             if name.starts_with('.') || !e.path().is_dir() {
                 return None;
             }
-            (!staging_dirs(cfg, &name).is_empty()).then_some(name)
+            (!leftover_dirs(cfg, &name).is_empty()).then_some(name)
         })
         .collect()
 }

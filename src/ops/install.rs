@@ -141,7 +141,7 @@ pub fn install_formulae_with(
     }
 
     // 5-7. Extract and relocate, in parallel: each keg is independent.
-    let poured = pour_all(cfg, &plan, &downloads, opts);
+    let mut poured = pour_all(cfg, &plan, &downloads, opts);
 
     // 8-14. Finish each keg in dependency order.
     let mut failed: HashSet<String> = HashSet::new();
@@ -150,11 +150,19 @@ pub fn install_formulae_with(
     let mut link_failures: Vec<String> = Vec::new();
 
     for item in &plan.items {
-        if let Some(error) = poured.get(item.name()).and_then(|r| r.as_ref().err()) {
-            output::onoe(&format!("{}: {error}", item.name()));
-            failed.insert(item.name().to_string());
-            continue;
-        }
+        let poured_keg = match poured.remove(item.name()) {
+            Some(Ok(keg)) => keg,
+            Some(Err(error)) => {
+                output::onoe(&format!("{}: {error}", item.name()));
+                failed.insert(item.name().to_string());
+                continue;
+            }
+            None => {
+                output::onoe(&format!("{}: nothing was poured", item.name()));
+                failed.insert(item.name().to_string());
+                continue;
+            }
+        };
         if depends_on_failed(item, &failed) {
             output::onoe(&format!(
                 "{}: skipped because a dependency failed to install",
@@ -162,8 +170,10 @@ pub fn install_formulae_with(
             ));
             // Its bottle is already unpacked: steps 4 and 5 run for the whole
             // plan before any of it is finished. Leaving the keg would make
-            // the next run believe the formula is installed, so it goes.
+            // the next run believe the formula is installed, so it goes, and
+            // whatever it replaced comes back.
             discard_unfinished_keg(cfg, item);
+            restore_backup(cfg, item, poured_keg);
             failed.insert(item.name().to_string());
             continue;
         }
@@ -185,6 +195,13 @@ pub fn install_formulae_with(
 
         match finish_item(cfg, index, &plan, item, &downloads, opts) {
             Ok(outcome) => {
+                // `Reinstall.reinstall_formula`'s success branch: the keg this
+                // run replaced only goes once finishing returned. A link that
+                // did not work out is not a failure here, exactly as it is not
+                // one for Homebrew.
+                if let Some(backup) = &poured_keg.backup {
+                    backup.discard();
+                }
                 if let Some(block) = outcome.link_failed {
                     link_failures.push(block);
                 }
@@ -197,6 +214,7 @@ pub fn install_formulae_with(
             Err(e) => {
                 output::onoe(&format!("{}: {e}", item.name()));
                 discard_unfinished_keg(cfg, item);
+                restore_backup(cfg, item, poured_keg);
                 failed.insert(item.name().to_string());
             }
         }
@@ -611,26 +629,41 @@ fn fetch_plan(
 
 // ----------------------------------------------------------------- pouring
 
+/// What one pour left for the finishing step to keep or undo.
+struct Poured {
+    /// The keg this pour displaced, kept at `<version>.reinstall` until the
+    /// install finished (`Homebrew::Reinstall.backup`).
+    backup: Option<extract::Backup>,
+    /// Whether that keg was linked before the pour unlinked it, so a restore
+    /// can put the link state back too (`Reinstall.restore_backup`).
+    was_linked: bool,
+}
+
 /// Extract and relocate every keg; independent formulae run in parallel.
 fn pour_all(
     cfg: &Config,
     plan: &Plan,
     downloads: &HashMap<String, Download>,
     opts: &InstallOptions,
-) -> HashMap<String, Result<()>> {
+) -> HashMap<String, Result<Poured>> {
     // `reinstall` and `upgrade` replace a keg that may still be linked. An
     // upgrade can land on a directory that is already there: `outdated` counts
     // the current version as outdated while it is neither linked nor
     // opt-linked, so `upgrade` pours the very version that sits in the rack.
+    // Whether it was linked has to be read before it is unlinked, so a restore
+    // can put the prefix back the way it found it.
+    let mut was_linked: HashMap<&str, bool> = HashMap::new();
     for item in &plan.items {
         for existing in &item.existing {
             if existing.version.to_string() == item.pkg_version() {
+                let linked = existing.is_linked(cfg);
+                *was_linked.entry(item.name()).or_default() |= linked;
                 let _ = keg::link::unlink(cfg, existing, LinkOptions::default());
             }
         }
     }
 
-    let results: Vec<(String, Result<()>)> = plan
+    let results: Vec<(String, Result<Poured>)> = plan
         .items
         .par_iter()
         .map(|item| {
@@ -638,10 +671,39 @@ fn pour_all(
             let Some(download) = downloads.get(&name) else {
                 return (name, Err(Error::user("no download for this formula")));
             };
-            (name, pour_one(cfg, item, download, opts))
+            let linked = was_linked.get(item.name()).copied().unwrap_or(false);
+            (name, pour_one(cfg, item, download, linked, opts))
         })
         .collect();
     results.into_iter().collect()
+}
+
+/// `Homebrew::Reinstall.restore_backup`: put the displaced keg back where it
+/// was and relink it when the pour had unlinked it.
+///
+/// The opt record always comes back — `unlink` removed it and every installed
+/// keg has one — while the prefix links only do when the keg had them.
+fn restore_backup(cfg: &Config, item: &Item, poured: Poured) {
+    let Some(backup) = poured.backup else {
+        return;
+    };
+    if let Err(e) = backup.restore() {
+        output::onoe(&format!(
+            "{}: could not put the previous keg back: {e}",
+            item.name()
+        ));
+        return;
+    }
+    let keg = item.keg(cfg);
+    let _ = keg::link::optlink(cfg, &keg, &item.formula.aliases, &item.formula.oldnames);
+    if poured.was_linked {
+        let _ = keg::link::link(
+            cfg,
+            &keg,
+            &item.formula.link_overwrite_paths,
+            LinkOptions::default(),
+        );
+    }
 }
 
 /// Remove a keg this run unpacked but never finished.
@@ -661,32 +723,49 @@ fn discard_unfinished_keg(cfg: &Config, item: &Item) {
     let _ = std::fs::remove_dir(cfg.rack(item.name()));
 }
 
-fn pour_one(cfg: &Config, item: &Item, download: &Download, _opts: &InstallOptions) -> Result<()> {
+fn pour_one(
+    cfg: &Config,
+    item: &Item,
+    download: &Download,
+    was_linked: bool,
+    _opts: &InstallOptions,
+) -> Result<Poured> {
     let pkg_version = item.pkg_version();
     let replace = item.action == Action::Reinstall
         || item
             .existing
             .iter()
             .any(|k| k.version.to_string() == pkg_version);
-    let keg_path =
-        extract::extract_bottle(cfg, &download.blob, item.name(), &pkg_version, replace)?;
+    let pour = extract::extract_bottle(cfg, &download.blob, item.name(), &pkg_version, replace)?;
 
-    let tab = receipt::tab_with_keg_fallback(&download.manifest.tab, &keg_path);
+    let tab = receipt::tab_with_keg_fallback(&download.manifest.tab, &pour.keg);
     let openjdk = openjdk_dependency(&tab);
     let result = relocate::relocate_keg(
         cfg,
         relocate::RelocateArgs {
-            keg_path: &keg_path,
+            keg_path: &pour.keg,
             cellar_kind: &item.cellar,
             tab: &tab,
             openjdk_dep: openjdk.as_deref(),
         },
     );
     match result {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(Poured {
+            backup: pour.backup,
+            was_linked,
+        }),
         Err(e) => {
-            // `FormulaInstaller#install` removes a keg that failed to pour.
-            let _ = std::fs::remove_dir_all(&keg_path);
+            // `FormulaInstaller#install` removes a keg that failed to pour,
+            // and `Reinstall` puts the keg it replaced back.
+            let _ = std::fs::remove_dir_all(&pour.keg);
+            restore_backup(
+                cfg,
+                item,
+                Poured {
+                    backup: pour.backup,
+                    was_linked,
+                },
+            );
             Err(e)
         }
     }

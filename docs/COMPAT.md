@@ -195,6 +195,16 @@ Cache naming (shared with Homebrew):
   and has no equivalent. The sweep holds the rack's formula lock, so a
   running install keeps its own staging directory.
 
+- Reinstall backup: a pour that replaces a keg moves it to
+  `$CELLAR/<name>/<pkg_version>.reinstall` and keeps it until the install has
+  finished, then removes it; a failure anywhere in between puts it back,
+  together with its `opt` and `linked` records
+  (`Homebrew::Reinstall.backup`/`restore_backup`). `cleanup` sweeps a backup a
+  killed run left behind, as `Cleanup#cleanup_reinstall_kegs` does.
+  DIFFERENCE: Homebrew's `Formula#installed_kegs` reports such a leftover as an
+  installed version (`rack.subdirs`); fastbrew does not, so a stale backup can
+  never make a rack look like it holds two versions.
+
 `INSTALL_RECEIPT.json` written after pouring a bottle (pretty JSON, 2-space
 indent, key order as below; keys `built_prefix`, `padded_prefix`,
 `linkage_files`, `binary_relocation_files`, `relocated_build_prefix`,

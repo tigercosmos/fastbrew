@@ -4,8 +4,10 @@
 //! directory inside the rack (`$CELLAR/<name>/.fastbrew-<random>`), then
 //! rename `<tmp>/<name>/<version>` to `$CELLAR/<name>/<version>`. Preserve
 //! modes, mtimes, symlinks and hard links. Fail if the keg already exists
-//! unless `replace` (used by `reinstall`), in which case the old keg is
-//! removed after a successful extraction.
+//! unless `replace` (used by `reinstall`, and by an `upgrade` pouring over the
+//! version already in the rack), in which case the old keg is moved aside to
+//! `<version>.reinstall` and kept until the caller reports that the install
+//! finished (`Homebrew::Reinstall.backup`/`restore_backup`).
 //!
 //! Homebrew does this with `tar --extract --file <bottle> --directory <tmp>`
 //! followed by `FileUtils.mv` (`formula_installer.rb#pour`, `Bottle#stage`);
@@ -23,14 +25,68 @@ use std::path::{Component, Path, PathBuf};
 use crate::config::Config;
 use crate::error::{Error, Result};
 
-/// Extracted keg path (`$CELLAR/<name>/<pkg_version>`).
+/// Suffix `Homebrew::Reinstall.backup_path` gives a keg it moves aside.
+const BACKUP_SUFFIX: &str = ".reinstall";
+
+/// The keg a replacing pour displaced, kept until the install finishes.
+///
+/// `Homebrew::Reinstall` moves the old keg to `<keg>.reinstall` before the
+/// replacement is installed, puts it back when anything between the pour and
+/// the last finishing step raises, and removes it only once `finish` returned.
+/// Deleting it as soon as the new keg is renamed into place would leave
+/// nothing at all behind when relocation or finishing then failed.
+#[derive(Debug)]
+pub struct Backup {
+    keg: PathBuf,
+    path: PathBuf,
+}
+
+impl Backup {
+    /// `$CELLAR/<name>/<version>.reinstall`.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// `Homebrew::Reinstall.restore_backup` without the relink (only the
+    /// caller knows whether the keg was linked): drop whatever is at the keg
+    /// path now and move the backup back onto it.
+    pub fn restore(&self) -> Result<()> {
+        if std::fs::symlink_metadata(&self.path).is_err() {
+            return Ok(());
+        }
+        remove_path(&self.keg);
+        std::fs::rename(&self.path, &self.keg).map_err(|e| {
+            Error::Other(anyhow::Error::new(e).context(format!(
+                "restoring {} from {}",
+                self.keg.display(),
+                self.path.display()
+            )))
+        })
+    }
+
+    /// The success branch of `Reinstall.reinstall_formula`: the old keg goes.
+    pub fn discard(&self) {
+        remove_path(&self.path);
+    }
+}
+
+/// What one pour left in the rack.
+#[derive(Debug)]
+pub struct Pour {
+    /// `$CELLAR/<name>/<pkg_version>`.
+    pub keg: PathBuf,
+    /// The keg this pour replaced, or `None` when the rack held none.
+    pub backup: Option<Backup>,
+}
+
+/// Extract `tarball` into `$CELLAR/<name>/<pkg_version>`.
 pub fn extract_bottle(
     cfg: &Config,
     tarball: &Path,
     name: &str,
     pkg_version: &str,
     replace: bool,
-) -> Result<PathBuf> {
+) -> Result<Pour> {
     let rack = cfg.rack(name);
     let keg = rack.join(pkg_version);
     let occupied = std::fs::symlink_metadata(&keg).is_ok();
@@ -51,25 +107,54 @@ pub fn extract_bottle(
     // and a removal before the new keg is in place would leave nothing behind
     // if the rename failed.
     let displaced = if occupied {
-        let old = unique_path(&rack, ".fastbrew-old-");
-        std::fs::rename(&keg, &old)?;
-        Some(old)
+        let path = backup_path(&keg);
+        // A backup a killed run left behind would block the rename.
+        remove_path(&path);
+        std::fs::rename(&keg, &path)?;
+        Some(Backup {
+            keg: keg.clone(),
+            path,
+        })
     } else {
         None
     };
     if let Err(e) = std::fs::rename(&unpacked, &keg) {
-        if let Some(old) = displaced {
-            let _ = std::fs::rename(&old, &keg);
+        if let Some(backup) = &displaced {
+            let _ = backup.restore();
         }
         return Err(Error::Other(anyhow::Error::new(e).context(format!(
             "moving the extracted bottle into {}",
             keg.display()
         ))));
     }
-    if let Some(old) = displaced {
-        let _ = std::fs::remove_dir_all(old);
+    Ok(Pour {
+        keg,
+        backup: displaced,
+    })
+}
+
+/// `Homebrew::Reinstall.backup_path`.
+pub fn backup_path(keg: &Path) -> PathBuf {
+    let mut path = keg.as_os_str().to_os_string();
+    path.push(BACKUP_SUFFIX);
+    PathBuf::from(path)
+}
+
+/// Whether a rack entry is a reinstall backup rather than an installed keg.
+pub fn is_backup_name(name: &str) -> bool {
+    name.ends_with(BACKUP_SUFFIX)
+}
+
+/// Remove a file, symlink or directory, ignoring what is not there.
+fn remove_path(path: &Path) {
+    let Ok(md) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if md.file_type().is_dir() {
+        let _ = std::fs::remove_dir_all(path);
+    } else {
+        let _ = std::fs::remove_file(path);
     }
-    Ok(keg)
 }
 
 /// The keg root has to be a real directory inside the staging directory.
@@ -361,7 +446,9 @@ mod tests {
         let cfg = Config::for_test(tmp.path());
         let tarball = make_bottle(tmp.path(), "tree", "2.3.2", "#!/bin/sh\necho tree\n");
 
-        let keg = extract_bottle(&cfg, &tarball, "tree", "2.3.2", false).unwrap();
+        let keg = extract_bottle(&cfg, &tarball, "tree", "2.3.2", false)
+            .unwrap()
+            .keg;
         assert_eq!(keg, cfg.cellar.join("tree/2.3.2"));
         let mode = std::fs::metadata(keg.join("bin/run"))
             .unwrap()
@@ -401,11 +488,47 @@ mod tests {
         let second_dir = tmp.path().join("second");
         std::fs::create_dir(&second_dir).unwrap();
         let second = make_bottle(&second_dir, "tree", "2.3.2", "#!/bin/sh\necho two\n");
-        let keg = extract_bottle(&cfg, &second, "tree", "2.3.2", true).unwrap();
+        let pour = extract_bottle(&cfg, &second, "tree", "2.3.2", true).unwrap();
         assert!(
-            std::fs::read_to_string(keg.join("bin/run"))
+            std::fs::read_to_string(pour.keg.join("bin/run"))
                 .unwrap()
                 .contains("two")
+        );
+        // The keg it replaced is kept until the caller says it may go.
+        let backup = pour.backup.as_ref().expect("the old keg was displaced");
+        assert_eq!(backup.path(), cfg.rack("tree").join("2.3.2.reinstall"));
+        assert!(
+            std::fs::read_to_string(backup.path().join("bin/run"))
+                .unwrap()
+                .contains("one")
+        );
+        backup.discard();
+        let leftovers: Vec<_> = std::fs::read_dir(cfg.rack("tree"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(leftovers, vec!["2.3.2".to_string()]);
+    }
+
+    #[test]
+    fn a_restored_backup_puts_the_previous_keg_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_test(tmp.path());
+        let first = make_bottle(tmp.path(), "tree", "2.3.2", "#!/bin/sh\necho one\n");
+        extract_bottle(&cfg, &first, "tree", "2.3.2", false).unwrap();
+
+        let second_dir = tmp.path().join("second");
+        std::fs::create_dir(&second_dir).unwrap();
+        let second = make_bottle(&second_dir, "tree", "2.3.2", "#!/bin/sh\necho two\n");
+        let pour = extract_bottle(&cfg, &second, "tree", "2.3.2", true).unwrap();
+        pour.backup.as_ref().unwrap().restore().unwrap();
+
+        assert!(
+            std::fs::read_to_string(pour.keg.join("bin/run"))
+                .unwrap()
+                .contains("one"),
+            "the working keg is back"
         );
         let leftovers: Vec<_> = std::fs::read_dir(cfg.rack("tree"))
             .unwrap()

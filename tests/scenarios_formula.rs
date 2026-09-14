@@ -2016,3 +2016,89 @@ fn a_bottle_whose_keg_root_is_a_symlink_is_refused() {
         "nothing outside the Cellar was written"
     );
 }
+
+/// `Homebrew::Reinstall` keeps the keg it replaces at `<version>.reinstall`
+/// until `finish` returned, so a reinstall that dies in relocation leaves the
+/// working keg — and its links — exactly where they were.
+#[test]
+fn a_reinstall_that_cannot_relocate_puts_the_working_keg_back() {
+    let sb = sandbox_or_skip!();
+
+    let full = Fixture::new("fbrelocatefail", "1.0").publish(&sb);
+    ok(&sb, &["install", &full]);
+    let command = sb.prefix.join("bin/fbrelocatefail");
+    assert!(command.is_symlink(), "the first install linked the command");
+
+    // The replacement checksums fine but carries a file that relocation
+    // cannot read as the Mach-O the bottle's tab promises.
+    Fixture::new("fbrelocatefail", "1.0")
+        .no_files()
+        .file("bin/fbrelocatefail", b"\xcf\xfa\xed\xfe")
+        .relocates("bin/fbrelocatefail")
+        .publish(&sb);
+
+    let text = fails(&sb, &["reinstall", &full]);
+    assert!(text.contains("Failed to install fbrelocatefail"), "{text}");
+
+    let keg = keg(&sb, "fbrelocatefail", "1.0");
+    assert_eq!(
+        std::fs::read_to_string(keg.join("bin/fbrelocatefail")).unwrap(),
+        "#!/bin/sh\necho fixture\n",
+        "the working keg is back:\n{text}"
+    );
+    assert!(keg.join("INSTALL_RECEIPT.json").is_file(), "{text}");
+    assert!(command.is_symlink(), "the command is linked again:\n{text}");
+    assert!(
+        sb.prefix.join("opt/fbrelocatefail").is_symlink(),
+        "the opt record is back:\n{text}"
+    );
+    assert!(
+        !sb.prefix
+            .join("Cellar/fbrelocatefail/1.0.reinstall")
+            .exists(),
+        "no backup was left behind:\n{text}"
+    );
+    // The restored keg is one installed version, not two.
+    let list = ok(&sb, &["list", "--versions", "fbrelocatefail"]);
+    assert_eq!(list.trim(), "fbrelocatefail 1.0", "{list}");
+}
+
+/// A link that does not work out is not a failed install for Homebrew: the keg
+/// stays, with its receipt, and only the `brew link` step is reported. The
+/// backup therefore goes, exactly as it does after a clean reinstall.
+#[test]
+fn a_reinstall_whose_link_fails_keeps_the_new_keg() {
+    let sb = sandbox_or_skip!();
+
+    let full = Fixture::new("fblinkfail", "1.0").publish(&sb);
+    ok(&sb, &["install", &full]);
+
+    // Something that is not ours sits where the replacement's second command
+    // would go. Unlinking the old keg leaves it alone, so the link fails.
+    std::fs::write(sb.prefix.join("bin/fblinkfail-extra"), b"not ours\n").unwrap();
+    Fixture::new("fblinkfail", "1.0")
+        .file("bin/fblinkfail-extra", b"#!/bin/sh\necho extra\n")
+        .publish(&sb);
+
+    let text = fails(&sb, &["reinstall", &full]);
+    assert!(
+        text.contains("The `brew link` step did not complete successfully"),
+        "{text}"
+    );
+
+    let keg = keg(&sb, "fblinkfail", "1.0");
+    assert!(
+        keg.join("bin/fblinkfail-extra").is_file(),
+        "the replacement was poured:\n{text}"
+    );
+    assert!(keg.join("INSTALL_RECEIPT.json").is_file(), "{text}");
+    assert!(
+        !sb.prefix.join("Cellar/fblinkfail/1.0.reinstall").exists(),
+        "the replaced keg is gone:\n{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sb.prefix.join("bin/fblinkfail-extra")).unwrap(),
+        "not ours\n",
+        "the foreign file is untouched"
+    );
+}
