@@ -596,8 +596,16 @@ fn cask_json(ctx: &Ctx, cask: &CaskEntry) -> Result<Value> {
             .map(|t| Value::Number(t.into()))
             .unwrap_or(Value::Null),
     );
-    let pinned = ctx.cfg.pinned_casks().join(&cask.token).is_symlink();
-    map.insert("pinned".into(), Value::Bool(pinned));
+    map.insert(
+        "pinned".into(),
+        Value::Bool(crate::cask::is_pinned(&ctx.cfg, &cask.token)),
+    );
+    map.insert(
+        "pinned_version".into(),
+        crate::cask::pinned_version(&ctx.cfg, &cask.token)
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
     let index = ctx.index()?;
     let outdated = !outdated_ops::outdated_casks(
         &ctx.cfg,
@@ -1788,7 +1796,19 @@ pub fn outdated(ctx: &Ctx, args: &OutdatedArgs) -> Result<()> {
     let casks = if args.formula && !args.cask {
         vec![]
     } else {
-        outdated_ops::outdated_casks(&ctx.cfg, index, names.as_deref(), greedy)?
+        let mut all = outdated_ops::outdated_casks(&ctx.cfg, index, names.as_deref(), greedy)?;
+        // `Cask#outdated_version` splits the two greedy switches: a
+        // `version :latest` cask needs `--greedy-latest`, an `auto_updates`
+        // one `--greedy-auto-updates`, and `--greedy` covers both. The sweep
+        // above only knows the union, so narrow it back down here.
+        if greedy && !args.greedy {
+            all.retain(|o| match index.cask(&o.token) {
+                Some(cask) if cask.is_latest() => args.greedy_latest,
+                Some(cask) if cask.auto_updates => args.greedy_auto_updates,
+                _ => true,
+            });
+        }
+        all
     };
 
     if let Some(version) = &args.json {
@@ -1809,8 +1829,8 @@ pub fn outdated(ctx: &Ctx, args: &OutdatedArgs) -> Result<()> {
                 "name": o.token,
                 "installed_versions": [o.installed_version],
                 "current_version": o.current_version,
-                "pinned": false,
-                "pinned_version": Value::Null,
+                "pinned": crate::cask::is_pinned(&ctx.cfg, &o.token),
+                "pinned_version": crate::cask::pinned_version(&ctx.cfg, &o.token),
             })).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
@@ -1837,8 +1857,13 @@ pub fn outdated(ctx: &Ctx, args: &OutdatedArgs) -> Result<()> {
     }
     for o in &casks {
         if verbose {
+            // `Cask#outdated_info`: `token (installed) != current [pinned at x]`.
+            let pinned = match crate::cask::pinned_version(&ctx.cfg, &o.token) {
+                Some(v) => format!(" [pinned at {v}]"),
+                None => String::new(),
+            };
             println!(
-                "{} ({}) != {}",
+                "{} ({}) != {}{pinned}",
                 o.token, o.installed_version, o.current_version
             );
         } else {

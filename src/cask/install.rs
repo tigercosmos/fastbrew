@@ -84,7 +84,7 @@ pub fn upgrade_casks(
     cfg: &Config,
     index: &Index,
     casks: &[CaskEntry],
-    greedy: bool,
+    greedy: Greedy,
     opts: &CaskInstallOptions,
 ) -> Result<()> {
     // An empty list is `brew upgrade --cask` with no arguments: every
@@ -112,7 +112,8 @@ pub fn upgrade_casks(
         };
         // `Cask::Upgrade.outdated_casks`: a cask named on the command line is
         // checked greedily, the sweep over every installed cask is not.
-        if !is_outdated(cfg, &cask, &installed, greedy || named) {
+        let greedy = if named { Greedy::ALL } else { greedy };
+        if !is_outdated(cfg, &cask, &installed, greedy) {
             // The sweep says nothing about the casks it leaves alone; only
             // the named form reports why it is skipping one.
             if named && !opts.quiet {
@@ -125,6 +126,34 @@ pub fn upgrade_casks(
             continue;
         }
         upgrades.push((cask, installed));
+    }
+
+    // `Cask::Upgrade.outdated_casks`: a pinned cask is never upgraded, and the
+    // ones it drops are reported (as a failure when they were named).
+    let pinned: Vec<String> = upgrades
+        .iter()
+        .filter(|(cask, _)| super::is_pinned(cfg, &cask.token))
+        .map(|(cask, installed)| format!("{} {}", cask.full_token(), installed.version))
+        .collect();
+    upgrades.retain(|(cask, _)| !super::is_pinned(cfg, &cask.token));
+    if !pinned.is_empty() && (!opts.quiet || named) {
+        let message = format!(
+            "Not upgrading {} pinned {}:",
+            pinned.len(),
+            if pinned.len() == 1 {
+                "package"
+            } else {
+                "packages"
+            }
+        );
+        if named {
+            output::ofail(&message);
+        } else {
+            output::opoo(&message);
+        }
+        if !opts.quiet {
+            eprintln!("{}", pinned.join(", "));
+        }
     }
 
     if upgrades.is_empty() {
@@ -210,7 +239,7 @@ pub fn install_cask_entry(
         }
         // `cmd/install.rb` hands its named casks to
         // `Cask::Upgrade.outdated_casks`, which checks each of them greedily.
-        if !is_outdated(cfg, cask, installed, true) {
+        if !is_outdated(cfg, cask, installed, Greedy::ALL) {
             if !opts.quiet {
                 output::opoo(&format!(
                     "Not upgrading {}, {}",
@@ -928,26 +957,52 @@ pub fn api_file_path(cfg: &Config) -> String {
         .into_owned()
 }
 
+/// `--greedy`, `--greedy-latest` and `--greedy-auto-updates`: which of the
+/// casks that keep themselves current an outdated check still considers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Greedy {
+    /// `--greedy`: both of the below.
+    pub all: bool,
+    /// `--greedy-latest`: `version :latest` casks.
+    pub latest: bool,
+    /// `--greedy-auto-updates`: `auto_updates true` casks.
+    pub auto_updates: bool,
+}
+
+impl Greedy {
+    /// What `Cask::Upgrade.outdated_casks` uses for a cask named on the
+    /// command line (`outdated?(greedy: true)`).
+    pub const ALL: Greedy = Greedy {
+        all: true,
+        latest: true,
+        auto_updates: true,
+    };
+
+    fn latest(self) -> bool {
+        self.all || self.latest
+    }
+
+    fn auto_updates(self) -> bool {
+        self.all || self.auto_updates
+    }
+}
+
 /// `Cask#outdated_version`, restricted to what the internal API can answer.
-///
-/// `greedy` is `--greedy`; `Cask::Upgrade.outdated_casks` also passes it for
-/// every cask named on the command line, so only the sweep over all installed
-/// casks runs non-greedily.
 pub fn is_outdated(
     cfg: &Config,
     cask: &CaskEntry,
     installed: &InstalledCask,
-    greedy: bool,
+    greedy: Greedy,
 ) -> bool {
     match cask.version.as_deref() {
         None => false,
         // A `version :latest` cask carries no version to compare, so Homebrew
         // fetches the container again and compares its checksum.
-        Some("latest") => greedy && outdated_download_sha(cfg, cask, installed),
+        Some("latest") => greedy.latest() && outdated_download_sha(cfg, cask, installed),
         Some(version) if version == installed.version => false,
         // An `auto_updates` cask updates itself; Homebrew leaves it alone
         // unless the check is greedy.
-        Some(_) => greedy || !cask.auto_updates,
+        Some(_) => greedy.auto_updates() || !cask.auto_updates,
     }
 }
 
@@ -1101,33 +1156,70 @@ mod tests {
             caskroom_path: tmp.path().join("Caskroom/demo"),
             metadata_path: None,
         };
+        let plain = Greedy::default();
         assert!(is_outdated(
             &cfg,
             &cask(serde_json::json!({"version": "1.1"})),
             &installed,
-            false
+            plain
         ));
         assert!(!is_outdated(
             &cfg,
             &cask(serde_json::json!({"version": "1.0"})),
             &installed,
-            false
+            plain
         ));
-        // An `auto_updates` cask keeps itself current, so it is outdated only
-        // when the check is greedy.
-        let auto = cask(serde_json::json!({"version": "1.1", "auto_updates": true}));
-        assert!(!is_outdated(&cfg, &auto, &installed, false));
-        assert!(is_outdated(&cfg, &auto, &installed, true));
 
-        // `version :latest` never counts without `--greedy`; with it, a
-        // missing `LATEST_DOWNLOAD_SHA256` means the download has to be
-        // checked, which the entry's unreachable url settles as "changed".
+        // An `auto_updates` cask keeps itself current, so it counts only for
+        // `--greedy` or `--greedy-auto-updates`.
+        let auto = cask(serde_json::json!({"version": "1.1", "auto_updates": true}));
+        assert!(!is_outdated(&cfg, &auto, &installed, plain));
+        assert!(!is_outdated(
+            &cfg,
+            &auto,
+            &installed,
+            Greedy {
+                latest: true,
+                ..plain
+            }
+        ));
+        assert!(is_outdated(
+            &cfg,
+            &auto,
+            &installed,
+            Greedy {
+                auto_updates: true,
+                ..plain
+            }
+        ));
+        assert!(is_outdated(&cfg, &auto, &installed, Greedy::ALL));
+
+        // `version :latest` needs `--greedy-latest`; the checksum comparison
+        // then has neither a recorded sha nor a reachable url, which
+        // `checksumable?` treats as outdated.
         let latest = cask(serde_json::json!({
             "version": "latest",
             "url_args": ["http://127.0.0.1:9/demo.zip"],
         }));
-        assert!(!is_outdated(&cfg, &latest, &installed, false));
-        assert!(is_outdated(&cfg, &latest, &installed, true));
+        assert!(!is_outdated(&cfg, &latest, &installed, plain));
+        assert!(!is_outdated(
+            &cfg,
+            &latest,
+            &installed,
+            Greedy {
+                auto_updates: true,
+                ..plain
+            }
+        ));
+        assert!(is_outdated(
+            &cfg,
+            &latest,
+            &installed,
+            Greedy {
+                latest: true,
+                ..plain
+            }
+        ));
     }
 
     #[test]

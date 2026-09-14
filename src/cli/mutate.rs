@@ -172,6 +172,12 @@ pub struct UpgradeArgs {
     pub force: bool,
     #[arg(short = 'g', long)]
     pub greedy: bool,
+    /// Also upgrade casks with `version :latest`.
+    #[arg(long)]
+    pub greedy_latest: bool,
+    /// Also upgrade casks with `auto_updates true`.
+    #[arg(long)]
+    pub greedy_auto_updates: bool,
 }
 
 pub fn upgrade(ctx: &Ctx, args: &UpgradeArgs) -> Result<()> {
@@ -199,7 +205,12 @@ pub fn upgrade(ctx: &Ctx, args: &UpgradeArgs) -> Result<()> {
             verbose: ctx.verbose,
             ..Default::default()
         };
-        crate::cask::install::upgrade_casks(&ctx.cfg, index, &casks, args.greedy, &opts)?;
+        let greedy = crate::cask::install::Greedy {
+            all: args.greedy,
+            latest: args.greedy_latest,
+            auto_updates: args.greedy_auto_updates,
+        };
+        crate::cask::install::upgrade_casks(&ctx.cfg, index, &casks, greedy, &opts)?;
     }
     Ok(())
 }
@@ -507,23 +518,24 @@ fn prepend_path_in_profile(path: &str) -> String {
 
 #[derive(Args, Debug)]
 pub struct PinArgs {
-    #[arg(value_name = "formula", required = true)]
+    #[arg(value_name = "formula|cask", required = true)]
     pub names: Vec<String>,
     // Homebrew: `conflicts "--formula", "--cask"`.
     #[arg(long, visible_alias = "formulae", conflicts_with = "cask")]
     pub formula: bool,
-    /// Pin a cask (delegates to brew).
     #[arg(long, visible_alias = "casks")]
     pub cask: bool,
 }
 
 pub fn pin(ctx: &Ctx, args: &PinArgs, pin_it: bool) -> Result<()> {
-    if args.cask {
-        let what = if pin_it { "pin" } else { "unpin" };
-        return ctx.delegate(&format!("`{what} --cask` is not implemented by fastbrew"));
-    }
     let index = ctx.index()?;
     for name in &args.names {
+        // `NamedArgs#to_resolved_formulae_to_casks`: a bare name may be
+        // either, and `--cask` makes every name a cask.
+        if args.cask || (!args.formula && is_cask_name(ctx, name)) {
+            pin_cask(ctx, name, pin_it)?;
+            continue;
+        }
         // Pinning acts on an installed keg, so the rack's receipt picks the tap.
         let formula = resolve::resolve_installed(&ctx.cfg, index, name)?;
         let full = formula.full_name();
@@ -546,6 +558,47 @@ pub fn pin(ctx: &Ctx, args: &PinArgs, pin_it: bool) -> Result<()> {
         } else {
             output::opoo(&format!("{full} not pinned"));
         }
+    }
+    Ok(())
+}
+
+/// Whether a bare name means a cask here: only an installed one, so a name a
+/// formula also carries keeps meaning the formula (`to_resolved_formulae_to_casks`
+/// resolves formulae first).
+fn is_cask_name(ctx: &Ctx, name: &str) -> bool {
+    crate::keg::installed_kegs(&ctx.cfg, name.rsplit('/').next().unwrap_or(name)).is_empty()
+        && crate::cask::installed_cask(&ctx.cfg, name).is_some()
+}
+
+/// `cmd/pin.rb` and `cmd/unpin.rb` for a cask.
+fn pin_cask(ctx: &Ctx, name: &str, pin_it: bool) -> Result<()> {
+    let index = ctx.index()?;
+    let cask = resolve::resolve_cask(&ctx.cfg, index, name)?;
+    let full = cask.full_token();
+    let installed = crate::cask::installed_cask(&ctx.cfg, &cask.token);
+    let pinned = crate::cask::is_pinned(&ctx.cfg, &cask.token);
+    if pin_it {
+        if pinned {
+            output::opoo(&format!("{full} already pinned"));
+        } else if let Some(installed) = &installed {
+            crate::cask::pin(&ctx.cfg, installed)?;
+            if cask.auto_updates {
+                output::opoo(&format!(
+                    "{full} has `auto_updates true` and may update itself outside Homebrew despite being pinned."
+                ));
+            }
+        } else {
+            output::ofail(&format!("{full} not installed"));
+        }
+        return Ok(());
+    }
+    // `cmd/unpin.rb` drops a dangling record too.
+    if pinned || crate::cask::pin_path(&ctx.cfg, &cask.token).is_symlink() {
+        crate::cask::unpin(&ctx.cfg, &cask.token)?;
+    } else if installed.is_none() {
+        output::onoe(&format!("{full} not installed"));
+    } else {
+        output::opoo(&format!("{full} not pinned"));
     }
     Ok(())
 }

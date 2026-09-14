@@ -356,6 +356,16 @@ and left-pads that field with zeroes to at least four hex digits
 (`0083;...` becomes `0183;...`). Bit `0x0040` is the separate user-approval
 flag that upgrades inherit; fastbrew does not set it.
 
+Pinning a cask (`brew pin --cask`, Homebrew 6) is a relative symlink
+`$PREFIX/var/homebrew/pinned_casks/<token>` -> `Caskroom/<token>/<version>`
+(`Cask#pin`). `pinned?` needs it to resolve, `pinned_version` is the basename
+it points at, and `unpin` drops it even when it dangles. `Cask::Upgrade` never
+upgrades a pinned cask and reports `Not upgrading N pinned package(s):`
+followed by `<full_name> <installed_version>` — `ofail` when casks were named,
+`opoo` for the sweep. `outdated --verbose` appends `[pinned at <version>]`.
+Pinning a cask with `auto_updates true` warns that it may update itself
+anyway.
+
 Uninstall directives run in `AbstractUninstall::ORDERED_DIRECTIVES` order:
 `early_script`, `launchctl`, `quit`, `signal`, `login_item`, `kext`, `script`,
 `pkgutil`, `delete`, `trash`, `rmdir`. `uninstall` runs all but `rmdir`, then

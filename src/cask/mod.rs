@@ -212,6 +212,58 @@ pub fn installed_cask(cfg: &Config, token: &str) -> Option<InstalledCask> {
     discover(&path)
 }
 
+// ------------------------------------------------------------- pinning
+
+/// `Cask#pin_path`: `$PREFIX/var/homebrew/pinned_casks/<token>`.
+pub fn pin_path(cfg: &Config, token: &str) -> PathBuf {
+    cfg.pinned_casks().join(token_from_full_token(token))
+}
+
+/// `Cask#pinned?`: a symlink that still resolves.
+pub fn is_pinned(cfg: &Config, token: &str) -> bool {
+    let path = pin_path(cfg, token);
+    path.is_symlink() && path.exists()
+}
+
+/// `Cask#pinned_version`: the staged version the pin points at.
+pub fn pinned_version(cfg: &Config, token: &str) -> Option<String> {
+    if !is_pinned(cfg, token) {
+        return None;
+    }
+    std::fs::canonicalize(pin_path(cfg, token))
+        .ok()?
+        .file_name()?
+        .to_str()
+        .map(str::to_string)
+}
+
+/// `Cask#pin`: a relative symlink to the installed version's staged directory.
+pub fn pin(cfg: &Config, installed: &InstalledCask) -> crate::error::Result<()> {
+    let versioned = installed.staged_path();
+    if !versioned.exists() {
+        return Ok(());
+    }
+    let path = pin_path(cfg, &installed.token);
+    std::fs::create_dir_all(cfg.pinned_casks())?;
+    if is_pinned(cfg, &installed.token) {
+        return Ok(());
+    }
+    if path.is_symlink() || path.is_file() {
+        std::fs::remove_file(&path)?;
+    }
+    crate::keg::make_relative_symlink(&path, &versioned)?;
+    Ok(())
+}
+
+/// `Cask#unpin`: drop the record, even when it dangles.
+pub fn unpin(cfg: &Config, token: &str) -> crate::error::Result<()> {
+    let path = pin_path(cfg, token);
+    if path.is_symlink() || path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
 /// Shared fixtures for the unit tests of the cask modules.
 #[cfg(test)]
 pub(crate) mod tests_support {

@@ -243,6 +243,19 @@ fn app_version(app: &Path) -> String {
         .to_string()
 }
 
+/// Sorted names of the entries directly inside `dir`.
+fn entries(dir: &Path) -> Vec<String> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut names: Vec<String> = read
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
 /// Sorted relative paths of everything under `root`.
 fn tree(root: &Path) -> Vec<String> {
     fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
@@ -518,4 +531,291 @@ fn a_bare_invocation_prints_the_usage_summary_on_stderr() {
 
     let help = env.stdout(&["help"]);
     assert_eq!(help, stderr);
+}
+
+// -------------------------------------------------------- cask lifecycle
+
+/// The whole install -> list -> upgrade -> uninstall round trip, with the
+/// greedy switches and the pin that holds a version back.
+#[test]
+fn the_cask_lifecycle_from_install_to_uninstall() {
+    let env = env_or_skip!();
+    let token = "fastbrew-lifecycle";
+    let app = "FastbrewLifecycle.app";
+    env.install_app_cask(token, app, "1.0", "");
+
+    // --- what the read-only commands report -------------------------------
+    assert_eq!(env.stdout(&["list", "--cask"]), format!("{token}\n"));
+    assert_eq!(
+        env.stdout(&["list", "--cask", "--versions"]),
+        format!("{token} 1.0\n")
+    );
+    let info = env.stdout(&["info", "--cask", token]);
+    assert!(
+        info.starts_with(&format!(
+            "==> fixture/casks/{token} ({token} fixture): 1.0\n"
+        )),
+        "{info}"
+    );
+    assert!(info.contains("\nInstalled\n"), "{info}");
+    assert!(info.contains(&format!("Caskroom/{token}/1.0")), "{info}");
+    assert!(info.contains(&format!("{app} (App)")), "{info}");
+
+    // Nothing is outdated while the tap still serves 1.0.
+    let plan = env.combined(&["upgrade", "--cask", "--dry-run"]);
+    assert_eq!(plan, "", "an up-to-date cask produces no output:\n{plan}");
+
+    // --- 2.0 upstream -----------------------------------------------------
+    let url = fixture_url(token, "2.0");
+    let sha = env.seed_app_zip(&url, app, "2.0");
+    env.write_cask(token, &app_cask_rb(token, "2.0", &url, &sha, app, ""));
+
+    let plan = env.combined(&["upgrade", "--cask", "--dry-run"]);
+    assert!(
+        plan.contains("==> Would upgrade 1 outdated package:"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains(&format!("fixture/casks/{token} 1.0 -> 2.0")),
+        "{plan}"
+    );
+    assert_eq!(
+        app_version(&env.appdir().join(app)),
+        "1.0",
+        "--dry-run changed the installed app"
+    );
+
+    // A pin holds it back, and says so.
+    assert!(env.run(&["pin", "--cask", token]).status.success());
+    let held = env.combined(&["upgrade", "--cask"]);
+    assert!(held.contains("Not upgrading 1 pinned package:"), "{held}");
+    assert!(
+        held.contains(&format!("fixture/casks/{token} 1.0")),
+        "{held}"
+    );
+    assert_eq!(app_version(&env.appdir().join(app)), "1.0");
+    assert!(env.run(&["unpin", "--cask", token]).status.success());
+
+    // --- the real upgrade -------------------------------------------------
+    let done = env.combined(&["upgrade", "--cask"]);
+    assert!(done.contains("==> Upgrading 1 outdated package:"), "{done}");
+    assert_eq!(app_version(&env.appdir().join(app)), "2.0");
+    assert_eq!(
+        env.stdout(&["list", "--cask", "--versions"]),
+        format!("{token} 2.0\n")
+    );
+
+    // Exactly one staged version, and no backup left behind.
+    let caskroom = env.caskroom(token);
+    assert_eq!(entries(&caskroom), [".metadata", "2.0"]);
+    assert!(backup_leftovers(&caskroom).is_empty());
+
+    // A second `upgrade` (formulae and casks) has nothing to do.
+    let again = env.combined(&["upgrade"]);
+    assert_eq!(again, "", "nothing left to upgrade:\n{again}");
+
+    // Naming it reports why it is being skipped.
+    let named = env.combined(&["upgrade", "--cask", token]);
+    assert!(
+        named.contains(&format!(
+            "Not upgrading {token}, the latest version is already installed"
+        )),
+        "{named}"
+    );
+
+    // --- reinstall and uninstall -----------------------------------------
+    let out = env.run(&["reinstall", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(app_version(&env.appdir().join(app)), "2.0");
+    assert_eq!(entries(&caskroom), [".metadata", "2.0"]);
+
+    let out = env.run(&["uninstall", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!env.appdir().join(app).exists());
+    assert!(!caskroom.exists());
+    assert_eq!(env.stdout(&["list", "--cask"]), "");
+
+    // Uninstalling it again is Homebrew's `CaskNotInstalledError`.
+    let out = env.run(&["uninstall", "--cask", token]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)).trim(),
+        format!("Error: Cask '{token}' is not installed.")
+    );
+}
+
+/// An `auto_updates` cask keeps itself current, so the sweep leaves it alone
+/// until the run is greedy; naming it is greedy by itself.
+#[test]
+fn auto_updates_casks_are_only_swept_up_when_greedy() {
+    let env = env_or_skip!();
+    let token = "fastbrew-auto-updates";
+    let app = "FastbrewAutoUpdates.app";
+    env.install_app_cask(token, app, "1.0", "  auto_updates true\n");
+
+    let url = fixture_url(token, "2.0");
+    let sha = env.seed_app_zip(&url, app, "2.0");
+    env.write_cask(
+        token,
+        &app_cask_rb(token, "2.0", &url, &sha, app, "  auto_updates true\n"),
+    );
+
+    // The sweep says nothing at all.
+    assert_eq!(env.combined(&["upgrade", "--cask", "--dry-run"]), "");
+    // `--greedy-latest` is for `version :latest` casks, not this one.
+    assert_eq!(
+        env.combined(&["upgrade", "--cask", "--dry-run", "--greedy-latest"]),
+        ""
+    );
+
+    for flag in ["--greedy", "--greedy-auto-updates"] {
+        let plan = env.combined(&["upgrade", "--cask", "--dry-run", flag]);
+        assert!(
+            plan.contains(&format!("fixture/casks/{token} 1.0 -> 2.0")),
+            "{flag} has to pick it up:\n{plan}"
+        );
+    }
+
+    // Naming the cask is greedy on its own (`outdated?(greedy: true)`).
+    let plan = env.combined(&["upgrade", "--cask", "--dry-run", token]);
+    assert!(
+        plan.contains(&format!("fixture/casks/{token} 1.0 -> 2.0")),
+        "{plan}"
+    );
+
+    // ... and so is `install`, which upgrades an outdated installed cask.
+    let out = env.run(&["install", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(app_version(&env.appdir().join(app)), "2.0");
+    let _ = env.run(&["uninstall", "--cask", token]);
+}
+
+/// A `version :latest` cask has no version to compare, so it is outdated only
+/// when the container's checksum has moved and the run asked for it.
+#[test]
+fn latest_casks_need_greedy_latest_and_a_changed_download() {
+    let env = env_or_skip!();
+    let token = "fastbrew-latest";
+    let app = "FastbrewLatest.app";
+
+    // `version :latest` with a url that does not carry the version.
+    let url = "https://example.invalid/fastbrew/fastbrew-latest.zip";
+    let sha = env.seed_app_zip(url, app, "1.0");
+    env.write_cask(token, &app_cask_rb(token, "latest", url, &sha, app, ""));
+    let out = env.run(&["install", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        env.stdout(&["list", "--cask", "--versions"]),
+        format!("{token} latest\n")
+    );
+
+    // The install recorded the container's checksum.
+    let recorded =
+        std::fs::read_to_string(env.caskroom(token).join(".metadata/LATEST_DOWNLOAD_SHA256"))
+            .expect("LATEST_DOWNLOAD_SHA256");
+    assert_eq!(recorded.trim(), sha);
+
+    // Nothing has changed, so even a greedy run leaves it alone.
+    for flags in [
+        vec!["upgrade", "--cask", "--dry-run"],
+        vec!["upgrade", "--cask", "--dry-run", "--greedy-auto-updates"],
+        vec!["upgrade", "--cask", "--dry-run", "--greedy"],
+        vec!["upgrade", "--cask", "--dry-run", "--greedy-latest"],
+    ] {
+        assert_eq!(
+            env.combined(&flags),
+            "",
+            "the download has not changed, so `{}` finds nothing",
+            flags.join(" ")
+        );
+    }
+    // Naming it reports Homebrew's `:latest` wording.
+    let named = env.combined(&["upgrade", "--cask", token]);
+    assert!(
+        named.contains(&format!(
+            "Not upgrading {token}, the downloaded artifact has not changed"
+        )),
+        "{named}"
+    );
+
+    // A new container under the same url is a new "version".
+    let changed = env.seed_app_zip(url, app, "2.0");
+    assert_ne!(changed, sha);
+    env.write_cask(token, &app_cask_rb(token, "latest", url, &changed, app, ""));
+    assert_eq!(env.combined(&["upgrade", "--cask", "--dry-run"]), "");
+    let plan = env.combined(&["upgrade", "--cask", "--dry-run", "--greedy-latest"]);
+    assert!(
+        plan.contains(&format!("fixture/casks/{token} latest -> latest")),
+        "{plan}"
+    );
+    let _ = env.run(&["uninstall", "--cask", token]);
+}
+
+/// `pin`/`unpin` work on casks in Homebrew 6 (`Cask#pin`): a relative symlink
+/// under `var/homebrew/pinned_casks`.
+#[test]
+fn pinning_a_cask_records_a_relative_symlink() {
+    let env = env_or_skip!();
+    let token = "fastbrew-pinned";
+    let app = "FastbrewPinned.app";
+    env.install_app_cask(token, app, "1.0", "");
+
+    let pin = env
+        .sandbox
+        .prefix
+        .join("var/homebrew/pinned_casks")
+        .join(token);
+    assert!(env.run(&["pin", "--cask", token]).status.success());
+    assert!(pin.is_symlink(), "{} is not a symlink", pin.display());
+    assert_eq!(
+        std::fs::read_link(&pin).unwrap(),
+        PathBuf::from(format!("../../../Caskroom/{token}/1.0")),
+        "Homebrew records a relative symlink"
+    );
+
+    // `info --json` of a *tap* cask needs the Ruby cask DSL, so it delegates
+    // rather than guessing (`docs/DESIGN.md` 5).
+    let out = env.run(&["info", "--json=v2", "--cask", token]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("needs the Ruby cask DSL"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Pinning twice warns rather than failing.
+    let again = env.combined(&["pin", "--cask", token]);
+    assert!(
+        again.contains(&format!("{token} already pinned")),
+        "{again}"
+    );
+
+    assert!(env.run(&["unpin", "--cask", token]).status.success());
+    assert!(!pin.exists() && !pin.is_symlink());
+    let repeated = env.combined(&["unpin", "--cask", token]);
+    assert!(
+        repeated.contains(&format!("{token} not pinned")),
+        "{repeated}"
+    );
+
+    // An uninstalled cask cannot be pinned: `ofail`, so the exit status is 1.
+    let out = env.run(&["pin", "--cask", "fastbrew-never-installed"]);
+    assert_eq!(out.status.code(), Some(1));
+    let _ = env.run(&["uninstall", "--cask", token]);
 }

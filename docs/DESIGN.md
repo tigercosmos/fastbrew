@@ -141,7 +141,7 @@ Homebrew's support-tier message, a run with findings ends by pointing at
 
 Delegated to `brew` (with a one-line notice on stderr):
 
-- `install --build-from-source`, `install --HEAD`, install of a formula with no bottle for this platform, install of a third-party tap formula whose metadata `rubylite` cannot extract, `postinstall` for a formula with a Ruby `post_install` (third-party taps), `bundle`, `test`, `edit`, `create`, `livecheck`, `--env` (it needs the full build environment), `link --cask`/`unlink --cask`, `pin --cask`/`unpin --cask`, every `dev-cmd`, and any command fastbrew does not know.
+- `install --build-from-source`, `install --HEAD`, install of a formula with no bottle for this platform, install of a third-party tap formula whose metadata `rubylite` cannot extract, `postinstall` for a formula with a Ruby `post_install` (third-party taps), `bundle`, `test`, `edit`, `create`, `livecheck`, `--env` (it needs the full build environment), `link --cask`/`unlink --cask`, every `dev-cmd`, and any command fastbrew does not know.
 
 If no `brew` is available the delegated command fails with an explanation and
 a pointer to the Homebrew installer.
