@@ -1451,6 +1451,117 @@ fn a_services_keg_is_listed_until_it_is_uninstalled() {
     );
 }
 
+/// A real formula that ships a service: the install writes both service files
+/// into the keg and says how to start it, `services` reports it as not
+/// loaded, and uninstalling takes it out of the list again. Nothing here ever
+/// talks to launchd. Gated on `FASTBREW_TEST_NETWORK=1`.
+#[test]
+fn installing_a_formula_with_a_service_writes_its_launchd_files() {
+    if !support::network_tests_enabled() {
+        eprintln!("set FASTBREW_TEST_NETWORK=1 to run network tests; skipping");
+        return;
+    }
+    let env = env_or_skip!();
+    // `beanstalkd` is relocatable, has no runtime dependencies and ships a
+    // service, which is what this scenario needs.
+    let name = "beanstalkd";
+    let Some(entry) = support::api_formula(name) else {
+        eprintln!("the API index has no {name}; skipping");
+        return;
+    };
+    let version = entry.pkg_version();
+
+    let out = env.run(&["install", name]);
+    assert!(
+        out.status.success(),
+        "install {name}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let installed = support::strip_ansi(&String::from_utf8_lossy(&out.stdout));
+    // `Caveats#service_block`.
+    assert!(
+        installed.contains(&format!(
+            "To start {name} now and restart at login:\n  brew services start {name}"
+        )),
+        "the caveats say how to start it:\n{installed}"
+    );
+
+    let keg = env.sandbox.prefix.join("Cellar").join(name).join(&version);
+    let plist = keg.join(format!("homebrew.mxcl.{name}.plist"));
+    assert!(plist.is_file(), "{} is missing", plist.display());
+    assert!(
+        keg.join(format!("homebrew.{name}.service")).is_file(),
+        "the systemd unit is missing"
+    );
+    let text = std::fs::read_to_string(&plist).expect("read the plist");
+    assert!(
+        text.contains(&format!(
+            "<key>Label</key>\n\t<string>homebrew.mxcl.{name}</string>"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "<string>{}/opt/{name}/bin/{name}</string>",
+            env.sandbox.prefix.display()
+        )),
+        "the run command is expanded against the prefix:\n{text}"
+    );
+
+    // `services list`: present, and not loaded.
+    let table = env.stdout(&["services", "list"]);
+    assert!(
+        table
+            .lines()
+            .any(|l| l.starts_with(&format!("{name} ")) && l.contains("none")),
+        "{table}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&env.stdout(&["services", "list", "--json"])).expect("json");
+    let row = json
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|s| s["name"] == serde_json::json!(name))
+        .expect("the service is listed");
+    assert_eq!(row["status"], serde_json::json!("none"));
+    assert_eq!(row["user"], serde_json::Value::Null);
+    // The path may be reported through its canonical form (`/private/var`
+    // under a temporary prefix), so only the keg-relative part is asserted.
+    assert!(
+        row["file"].as_str().is_some_and(|f| f.ends_with(&format!(
+            "Cellar/{name}/{version}/homebrew.mxcl.{name}.plist"
+        ))),
+        "{row}"
+    );
+
+    let info = env.stdout(&["services", "info", name]);
+    assert_eq!(
+        info,
+        format!(
+            "{name} (homebrew.mxcl.{name})\nRunning: false\nLoaded: false\nSchedulable: false\n"
+        )
+    );
+    let info_json: serde_json::Value =
+        serde_json::from_str(&env.stdout(&["services", "info", "--json", name])).expect("json");
+    assert_eq!(info_json[0]["running"], serde_json::json!(false));
+    assert_eq!(info_json[0]["loaded"], serde_json::json!(false));
+
+    // Uninstalling takes the service with it.
+    let out = env.run(&["uninstall", name]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(env.stdout(&["services", "list"]), "");
+    assert_eq!(env.stdout(&["services", "list", "--json"]).trim(), "[]");
+    assert_eq!(
+        env.stdout(&["services", "cleanup"]).trim(),
+        "All user-space services OK, nothing cleaned..."
+    );
+}
+
 /// `--sudo-service-user` names the user the service runs as, so it needs a
 /// value and root (`Subcommand.dispatch`). Nothing about it may be guessed:
 /// a missing username used to leave the plist untouched and the service
