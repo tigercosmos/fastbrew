@@ -949,6 +949,53 @@ fn requirements_and_conflicts_stop_the_install_before_staging() {
     );
     assert!(!env.caskroom(token).exists(), "nothing may be staged");
 
+    // `Cask::Info.requirements_info` shows the same requirement.
+    let info = env.stdout(&["info", "--cask", token]);
+    assert!(
+        info.contains("==> Requirements\nRequired: macOS >= 27\n"),
+        "{info}"
+    );
+
+    // --- deprecate! ------------------------------------------------------
+    let gone = "fastbrew-deprecated";
+    let url = fixture_url(gone, "1.0");
+    let sha = env.seed_app_zip(&url, "FastbrewDeprecated.app", "1.0");
+    env.write_cask(
+        gone,
+        &app_cask_rb(
+            gone,
+            "1.0",
+            &url,
+            &sha,
+            "FastbrewDeprecated.app",
+            "  deprecate! date: \"2020-01-01\", because: :discontinued\n",
+        ),
+    );
+    // `DeprecateDisable.message` with its first letter upcased, and the date
+    // in the past tense because it has passed.
+    let info = env.stdout(&["info", "--cask", gone]);
+    assert!(
+        info.contains(
+            "Deprecated because it is discontinued upstream! It was disabled on 2020-01-01.\n"
+        ),
+        "{info}"
+    );
+    // A deprecation only warns; the install still happens.
+    let out = env.run(&["install", "--cask", gone]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)).contains(&format!(
+            "Warning: {gone} has been deprecated because it is discontinued upstream!"
+        )),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = env.run(&["uninstall", "--cask", gone]);
+
     // --- conflicts_with cask ---------------------------------------------
     let first = "fastbrew-conflict-a";
     let second = "fastbrew-conflict-b";

@@ -356,6 +356,17 @@ and left-pads that field with zeroes to at least four hex digits
 (`0083;...` becomes `0183;...`). Bit `0x0040` is the separate user-approval
 flag that upgrades inherit; fastbrew does not set it.
 
+`info --cask` prints, after the homepage, `DeprecateDisable.message` with its
+first letter upcased (`Deprecated because it is discontinued upstream! It was
+disabled on <date>.`, the tense following whether the date has passed, the
+reason taken from `CASK_DEPRECATE_DISABLE_REASONS`), and after `From:` an
+`==> Requirements` section whose single `Required:` line lists
+`CaskDependent#requirements` in their order — the architectures
+(`x86_64 architecture`, with `:intel`/`:arm` normalised to their 64-bit
+names), then `macos`, then `maximum_macos`, each as
+`MacOSRequirement#display_s` spells it (`macOS >= 13`, `macOS == 13 / 14`, or
+a bare `macOS` when no version is given).
+
 Pinning a cask (`brew pin --cask`, Homebrew 6) is a relative symlink
 `$PREFIX/var/homebrew/pinned_casks/<token>` -> `Caskroom/<token>/<version>`
 (`Cask#pin`). `pinned?` needs it to resolve, `pinned_version` is the basename

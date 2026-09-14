@@ -397,6 +397,15 @@ pub fn print_cask_info(ctx: &Ctx, cask: &CaskEntry) {
     if let Some(homepage) = &cask.homepage {
         println!("{}", output::format_url(homepage));
     }
+    // `DeprecateDisable.message` with its first letter upcased.
+    if let Some(message) = crate::cask::install::deprecate_disable_message(cask) {
+        let mut chars = message.chars();
+        let upcased = match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => message,
+        };
+        println!("{upcased}");
+    }
     match &installed_version {
         Some(v) => {
             let dir = cfg.caskroom().join(&cask.token).join(v);
@@ -413,6 +422,16 @@ pub fn print_cask_info(ctx: &Ctx, cask: &CaskEntry) {
                 "https://github.com/Homebrew/homebrew-cask/blob/HEAD/{path}"
             ))
         );
+    }
+    // `Cask::Info.requirements_info`.
+    let requirements = crate::cask::install::requirement_display_strings(cask);
+    if !requirements.is_empty() {
+        output::ohai("Requirements");
+        let rendered: Vec<String> = requirements
+            .iter()
+            .map(|(text, satisfied)| fmt::install_status(text, *satisfied, installed))
+            .collect();
+        println!("Required: {}", rendered.join(", "));
     }
     let artifacts = cask.artifacts();
     let shown: Vec<&crate::model::cask::Artifact> = artifacts
