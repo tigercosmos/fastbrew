@@ -98,6 +98,12 @@ pub struct InstallArgs {
     /// Enable linking of a cask's helper executables (the default).
     #[arg(long, conflicts_with = "no_binaries")]
     pub binaries: bool,
+    /// Do not quarantine a cask's download and staged files.
+    #[arg(long)]
+    pub no_quarantine: bool,
+    /// Quarantine a cask's download and staged files (the default).
+    #[arg(long, conflicts_with = "no_quarantine")]
+    pub quarantine: bool,
     #[arg(long, value_name = "path")]
     pub appdir: Option<String>,
     #[arg(long, value_name = "path")]
@@ -160,6 +166,13 @@ fn cask_options(ctx: &Ctx, args: &InstallArgs, reinstall: bool) -> CaskInstallOp
     } else {
         crate::cask::config::bool_flag(env, "binaries")
     };
+    let quarantine = if args.quarantine {
+        Some(true)
+    } else if args.no_quarantine {
+        Some(false)
+    } else {
+        crate::cask::config::bool_flag(env, "quarantine")
+    };
     CaskInstallOptions {
         force: args.force,
         adopt: args.adopt,
@@ -176,6 +189,7 @@ fn cask_options(ctx: &Ctx, args: &InstallArgs, reinstall: bool) -> CaskInstallOp
         zap: false,
         upgrade: false,
         dependency_chain: Vec::new(),
+        no_quarantine: quarantine == Some(false),
     }
 }
 
@@ -200,6 +214,12 @@ pub struct UpgradeArgs {
     /// Also upgrade casks with `auto_updates true`.
     #[arg(long)]
     pub greedy_auto_updates: bool,
+    /// Do not quarantine a cask's download and staged files.
+    #[arg(long)]
+    pub no_quarantine: bool,
+    /// Quarantine a cask's download and staged files (the default).
+    #[arg(long, conflicts_with = "no_quarantine")]
+    pub quarantine: bool,
 }
 
 pub fn upgrade(ctx: &Ctx, args: &UpgradeArgs) -> Result<()> {
@@ -220,11 +240,19 @@ pub fn upgrade(ctx: &Ctx, args: &UpgradeArgs) -> Result<()> {
         crate::ops::upgrade::upgrade_formulae(&ctx.cfg, index, &formulae, &opts)?;
     }
     if want_casks && (args.names.is_empty() || !casks.is_empty()) {
+        let quarantine = if args.quarantine {
+            Some(true)
+        } else if args.no_quarantine {
+            Some(false)
+        } else {
+            crate::cask::config::bool_flag(&ctx.cfg.cask_opts, "quarantine")
+        };
         let opts = CaskInstallOptions {
             force: args.force,
             dry_run: args.dry_run,
             quiet: ctx.quiet,
             verbose: ctx.verbose,
+            no_quarantine: quarantine == Some(false),
             ..Default::default()
         };
         let greedy = crate::cask::install::Greedy {
@@ -672,6 +700,12 @@ pub struct FetchArgs {
     /// Also download the dependencies.
     #[arg(long)]
     pub deps: bool,
+    /// Do not quarantine a cask's download.
+    #[arg(long)]
+    pub no_quarantine: bool,
+    /// Quarantine a cask's download (the default).
+    #[arg(long, conflicts_with = "no_quarantine")]
+    pub quarantine: bool,
 }
 
 pub fn fetch(ctx: &Ctx, args: &FetchArgs) -> Result<()> {
@@ -681,7 +715,13 @@ pub fn fetch(ctx: &Ctx, args: &FetchArgs) -> Result<()> {
         crate::ops::install::fetch_formulae(&ctx.cfg, index, &formulae, args.deps, args.force)?;
     }
     if !casks.is_empty() {
-        crate::cask::install::fetch_casks(&ctx.cfg, &casks, args.force)?;
+        let no_quarantine = if args.quarantine {
+            false
+        } else {
+            args.no_quarantine
+                || crate::cask::config::bool_flag(&ctx.cfg.cask_opts, "quarantine") == Some(false)
+        };
+        crate::cask::install::fetch_casks(&ctx.cfg, &casks, args.force, no_quarantine)?;
     }
     Ok(())
 }

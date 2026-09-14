@@ -367,14 +367,30 @@ the resolved URL. A checksum mismatch deletes the file and aborts with
 
 DMG: `hdiutil attach -plist -nobrowse -readonly -mountrandom <tmpdir> <dmg>` with stdin `qn\n` (declines EULA prompts); on failure convert with `hdiutil convert -format UDTO -o <x.cdr>` and attach that. Parse the plist `system-entities[].mount-point`. Copy contents with `ditto`, excluding `UnpackStrategy::Dmg::Bom::DMG_METADATA` (`.background`, `.com.apple.timemachine.donotpresent`, `.com.apple.timemachine.supported`, `.DocumentRevisions-V100`, `.DS_Store`, `.fseventsd`, `.MobileBackups`, `.Spotlight-V100`, `.TemporaryItems`, `.Trashes`, `.VolumeIcon.icns`, `.HFS+ Private Directory Data\r`, `.HFS+ Private Data\r`) and aliases to system directories such as `/Applications`, then `chmod u+w` and `hdiutil detach -force`. ZIP: `ditto -x -k --sequesterRsrc <zip> <dir>` (or `unzip`). Fonts are moved (not copied) into `fontdir`. App move: if the target exists and `--force` is absent, abort with `It seems there is already an App at '<target>'.`; `--adopt` accepts an identical existing app.
 
-Quarantine (`Library/Homebrew/cask/quarantine.rb`): read `com.apple.quarantine`
-from the download (`xattr -p`). When it is present, `Quarantine.propagate`
+Quarantine (`Library/Homebrew/cask/quarantine.rb` and
+`extend/os/mac/cask/quarantine.rb`): after a download is fetched,
+`Quarantine.cask!` registers it with LaunchServices by setting
+`kCFURLQuarantinePropertiesKey` on it
+(`kLSQuarantineTypeWebDownload`, agent name `Homebrew Cask`, the cask's `url`
+as the data URL and its `homepage` as the origin URL). macOS then writes
+`com.apple.quarantine` itself, as `<flags>;<hex time>;<agent>;<event uuid>`,
+and records the event in its quarantine database; a download that already has
+the attribute is left alone. Failing to write it is an error
+(`CaskQuarantineError`). Difference from Homebrew 6.0.22, which always
+quarantines: fastbrew keeps the older `--no-quarantine` switch (also read from
+`HOMEBREW_CASK_OPTS`), which skips this step, and then nothing is propagated
+either. `--quarantine` turns it back on.
+
+The staged files then take the download's `com.apple.quarantine`
+(`xattr -p`). When it is present, `Quarantine.propagate`
 writes it onto every path under the staged directory (the directory itself
 excluded, symlinks skipped, each made `u+w` first) after
 `toggle_no_translocation_bit` ORs `0x0100` into the first `;`-separated field
 and left-pads that field with zeroes to at least four hex digits
 (`0083;...` becomes `0183;...`). Bit `0x0040` is the separate user-approval
-flag that upgrades inherit; fastbrew does not set it.
+flag that upgrades inherit; fastbrew does not set it. A staged file that
+cannot be given the attribute fails the install
+(`CaskQuarantinePropagationError`).
 
 `info --cask` prints, after the homepage, `DeprecateDisable.message` with its
 first letter upcased (`Deprecated because it is discontinued upstream! It was

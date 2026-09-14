@@ -205,9 +205,10 @@ types abort post-install with a clear error and suggest `brew postinstall`.
    `nested:` unpacks the inner file). dmg: `hdiutil attach -plist -nobrowse
    -readonly -mountrandom`, copy with `ditto`, `hdiutil detach`. zip: `ditto
    -x -k`. tar family: native. pkg: left in place for the `pkg` artifact.
-5. Copy the quarantine attribute the way Homebrew does (`xattr` on staged
-   files with the download's `com.apple.quarantine` value, no-translocation
-   bit set).
+5. Quarantine the download the way Homebrew does (register it with
+   LaunchServices as a web download so macOS writes `com.apple.quarantine`),
+   then copy that value onto the staged files with the no-translocation bit
+   set. `--no-quarantine` opts out of both.
 6. Run artifacts in the API order: `preflight_steps`, moved artifacts (`app`,
    `suite`, `artifact`, `font`, `qlplugin`, `prefpane`, ...) into their
    configured directories (defaults in `docs/COMPAT.md` section 6, overridable

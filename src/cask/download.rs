@@ -328,15 +328,25 @@ pub fn cached_basename(path: &Path) -> String {
     }
 }
 
+/// How a download is fetched (`Cask::Download#fetch`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DownloadOptions {
+    pub quiet: bool,
+    /// `--no-quarantine` / `HOMEBREW_CASK_OPTS=--no-quarantine`: skip
+    /// `Quarantine.cask!` on the download, so nothing is propagated onto the
+    /// staged files either.
+    pub no_quarantine: bool,
+}
+
 /// Download the cask's `url`, verify its checksum and return the cached path.
-pub fn download_cask(cfg: &Config, cask: &CaskEntry, quiet: bool) -> Result<PathBuf> {
+pub fn download_cask(cfg: &Config, cask: &CaskEntry, opts: DownloadOptions) -> Result<PathBuf> {
     let url = cask
         .url()
         .ok_or_else(|| Error::user(format!("Cask '{}' has no url.", cask.token)))?;
     let kwargs = UrlKwargs::from_value(cask.url_kwargs.as_ref());
     let version = cask.version.as_deref().unwrap_or("latest");
 
-    let path = fetch(cfg, url, &kwargs, quiet)?;
+    let path = fetch(cfg, url, &kwargs, opts.quiet)?;
 
     // Symlink under `$CACHE/Cask` so `brew` and fastbrew share the download.
     let link = symlink_location(cfg, &cask.token, version, url);
@@ -344,6 +354,11 @@ pub fn download_cask(cfg: &Config, cask: &CaskEntry, quiet: bool) -> Result<Path
     let _ = std::fs::remove_file(&link);
     let _ = crate::keg::make_relative_symlink(&link, &path);
 
+    // `Cask::Download#fetch` quarantines before it verifies, so a container
+    // that is staged is always one macOS has recorded as a web download.
+    if !opts.no_quarantine {
+        super::quarantine::cask(&path, url, cask.homepage.as_deref().unwrap_or_default())?;
+    }
     verify_checksum(cask, &path)?;
     Ok(path)
 }

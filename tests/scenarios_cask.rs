@@ -1073,6 +1073,145 @@ fn a_binary_artifact_will_not_overwrite_an_existing_file() {
     assert!(!env.appdir().join(app).exists());
 }
 
+/// Build the fixture container for `app` without seeding the download cache,
+/// so a test can serve it over a loopback HTTP server instead.
+fn build_fixture_zip(env: &Env, app: &str, version: &str) -> (Vec<u8>, String) {
+    let zip = build_app_zip(&env.sandbox.home.join("fixtures"), app, version);
+    let sha = download::file_sha256(&zip).expect("sha256 of the fixture zip");
+    (std::fs::read(&zip).expect("read the fixture zip"), sha)
+}
+
+/// A loopback HTTP server that serves one payload and records what it was sent,
+/// so a test can exercise the real download path without the network.
+struct FileServer {
+    port: u16,
+    payload: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl FileServer {
+    fn start(payload: Vec<u8>) -> FileServer {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+        let port = listener.local_addr().expect("local address").port();
+        let payload = std::sync::Arc::new(std::sync::Mutex::new(payload));
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let served = std::sync::Arc::clone(&payload);
+        let seen = std::sync::Arc::clone(&requests);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                seen.lock()
+                    .expect("requests")
+                    .push(String::from_utf8_lossy(&head).into_owned());
+                let body = served.lock().expect("payload").clone();
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = stream.write_all(&body);
+            }
+        });
+        FileServer {
+            port,
+            payload,
+            requests,
+        }
+    }
+
+    fn url(&self, name: &str) -> String {
+        format!("http://127.0.0.1:{}/{name}", self.port)
+    }
+
+    fn serve(&self, payload: Vec<u8>) {
+        *self.payload.lock().expect("payload") = payload;
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.requests.lock().expect("requests").clone()
+    }
+}
+
+/// `Cask::Download#fetch` quarantines the container it just downloaded
+/// (`Quarantine.cask!`) and `#extract_primary_container` propagates the value
+/// onto the staged files with the no-translocation bit set, so the app macOS
+/// ends up running is one Gatekeeper still evaluates.
+#[test]
+fn a_fresh_download_and_the_app_it_stages_are_quarantined() {
+    use fastbrew::cask::quarantine;
+
+    let env = env_or_skip!();
+    let app = "FastbrewQuarantine.app";
+    let (payload, sha) = build_fixture_zip(&env, app, "1.0");
+    let server = FileServer::start(payload);
+
+    let token = "fastbrew-quarantine";
+    let url = server.url("fresh.zip");
+    env.write_cask(token, &app_cask_rb(token, "1.0", &url, &sha, app, ""));
+    let out = env.run(&["install", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(server.requests().len(), 1, "the container was fetched once");
+
+    let download = download::cached_location(&env.config(), &url, "fresh.zip");
+    let Some(downloaded) = quarantine::status(&download) else {
+        eprintln!("this filesystem keeps no extended attributes; skipping");
+        return;
+    };
+    // `<flags>;<hex time>;<agent>;<event uuid>`, composed by macOS itself.
+    assert_eq!(downloaded.split(';').count(), 4, "{downloaded}");
+    let installed = env.appdir().join(app);
+    assert_eq!(
+        quarantine::status(&installed).as_deref(),
+        Some(quarantine::toggle_no_translocation_bit(&downloaded).as_str()),
+        "the installed app carries the download's quarantine, un-translocated"
+    );
+    assert_eq!(
+        quarantine::status(&installed.join("Contents/MacOS/demo")).as_deref(),
+        Some(quarantine::toggle_no_translocation_bit(&downloaded).as_str()),
+        "propagation reaches every staged file"
+    );
+
+    // `--no-quarantine` opts out, and nothing is propagated either.
+    let plain = "fastbrew-no-quarantine";
+    let plain_app = "FastbrewNoQuarantine.app";
+    let (payload, sha) = build_fixture_zip(&env, plain_app, "1.0");
+    server.serve(payload);
+    let url = server.url("plain.zip");
+    env.write_cask(plain, &app_cask_rb(plain, "1.0", &url, &sha, plain_app, ""));
+    let out = env.run(&["install", "--cask", "--no-quarantine", plain]);
+    assert!(
+        out.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        server.requests().len(),
+        2,
+        "the second container was fetched"
+    );
+    let download = download::cached_location(&env.config(), &url, "plain.zip");
+    assert_eq!(quarantine::status(&download), None);
+    assert_eq!(quarantine::status(&env.appdir().join(plain_app)), None);
+
+    let _ = env.run(&["uninstall", "--cask", token, plain]);
+}
+
 /// Write a fixture cask whose container is seeded, with `extra` stanzas.
 fn write_app_cask(env: &Env, token: &str, app: &str, extra: &str) {
     let url = fixture_url(token, "1.0");

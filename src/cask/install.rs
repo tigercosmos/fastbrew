@@ -18,6 +18,7 @@ use crate::platform::{Host, MacOsVersion};
 
 use super::artifacts::{self, ArtifactOptions, ArtifactSpec, CaskContext};
 use super::config::CaskDirs;
+use super::download::DownloadOptions;
 use super::metadata::{self, ReceiptInput};
 use super::{InstalledCask, quarantine, unpack};
 
@@ -44,9 +45,19 @@ pub struct CaskInstallOptions {
     /// Tokens of the casks whose dependency closure this install is part of,
     /// outermost first. Empty for a cask named on the command line.
     pub dependency_chain: Vec<String>,
+    /// `--no-quarantine`: do not record the download with LaunchServices, so
+    /// the staged app carries no `com.apple.quarantine` attribute.
+    pub no_quarantine: bool,
 }
 
 impl CaskInstallOptions {
+    fn download_options(&self) -> DownloadOptions {
+        DownloadOptions {
+            quiet: self.quiet,
+            no_quarantine: self.no_quarantine,
+        }
+    }
+
     fn artifact_options(&self) -> ArtifactOptions {
         ArtifactOptions {
             force: self.force,
@@ -251,21 +262,38 @@ pub fn upgrade_casks(
     Ok(())
 }
 
-pub fn fetch_casks(cfg: &Config, casks: &[CaskEntry], force: bool) -> Result<()> {
+pub fn fetch_casks(
+    cfg: &Config,
+    casks: &[CaskEntry],
+    force: bool,
+    no_quarantine: bool,
+) -> Result<()> {
     for cask in casks {
-        fetch_cask_entry(cfg, cask, force)?;
+        fetch_cask_entry(cfg, cask, force, no_quarantine)?;
     }
     Ok(())
 }
 
 /// Download a cask's container without installing it.
-pub fn fetch_cask_entry(cfg: &Config, cask: &CaskEntry, force: bool) -> Result<PathBuf> {
+pub fn fetch_cask_entry(
+    cfg: &Config,
+    cask: &CaskEntry,
+    force: bool,
+    no_quarantine: bool,
+) -> Result<PathBuf> {
     if force && let Some(url) = cask.url() {
         let guessed = super::download::parse_basename(url, true);
         let cached = super::download::cached_location(cfg, url, &guessed);
         let _ = std::fs::remove_file(cached);
     }
-    super::download::download_cask(cfg, cask, false)
+    super::download::download_cask(
+        cfg,
+        cask,
+        DownloadOptions {
+            no_quarantine,
+            ..DownloadOptions::default()
+        },
+    )
 }
 
 // -------------------------------------------------------- entry level
@@ -321,7 +349,7 @@ pub fn install_cask_entry(
 
     // `Cask::Installer#install` fetches before it touches an installed version:
     // a download failure must leave the working install alone.
-    let download = super::download::download_cask(cfg, cask, opts.quiet)?;
+    let download = super::download::download_cask(cfg, cask, opts.download_options())?;
     install_dependencies(cfg, index, dirs, cask, opts)?;
 
     match &installed {
@@ -499,7 +527,7 @@ fn upgrade_installed(
 
     // `Cask::Upgrade.upgrade_cask` fetches the new version first, so a failed
     // download leaves the installed one running.
-    let download = super::download::download_cask(cfg, cask, opts.quiet)?;
+    let download = super::download::download_cask(cfg, cask, opts.download_options())?;
     install_dependencies(cfg, index, dirs, cask, &opts)?;
     replace_installed(cfg, index, cask, installed, &opts, &download)
 }
@@ -1290,10 +1318,19 @@ fn outdated_download_sha(cfg: &Config, cask: &CaskEntry, installed: &InstalledCa
     if recorded.is_empty() {
         return true;
     }
-    super::download::download_cask(cfg, cask, true)
-        .and_then(|path| super::download::file_sha256(&path))
-        .map(|current| current != recorded)
-        .unwrap_or(true)
+    super::download::download_cask(
+        cfg,
+        cask,
+        DownloadOptions {
+            quiet: true,
+            // A check never changes what is installed, so it never needs to
+            // touch the download's quarantine metadata either.
+            no_quarantine: true,
+        },
+    )
+    .and_then(|path| super::download::file_sha256(&path))
+    .map(|current| current != recorded)
+    .unwrap_or(true)
 }
 
 /// `Cask::Upgrade.outdated_casks`' wording for a named cask it is skipping.
