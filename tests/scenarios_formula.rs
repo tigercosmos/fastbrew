@@ -844,6 +844,38 @@ fn unlink_link_conflicts_and_overwrite() {
     assert_eq!(links_into(&sb, "jq"), linked);
 }
 
+#[test]
+fn unlink_removes_the_links_that_are_there_not_the_newest_kegs() {
+    let sb = sandbox_or_skip!();
+
+    // 1.0 is linked, 2.0 is installed but not: `unlink` has to take the keg
+    // the prefix records point at (`NamedArgs#resolve_default_keg`), not the
+    // one that sorts highest.
+    sb.add_keg("demo", "2.0", true);
+    sb.add_keg("demo", "1.0", true);
+    support::symlink("../Cellar/demo/1.0", &sb.prefix.join("opt/demo"));
+    support::symlink(
+        "../../../Cellar/demo/1.0",
+        &sb.prefix.join("var/homebrew/linked/demo"),
+    );
+    support::symlink("../Cellar/demo/1.0/bin/demo", &sb.prefix.join("bin/demo"));
+
+    let out = ok(&sb, &["unlink", "demo"]);
+    assert!(
+        out.contains(&format!(
+            "Unlinking {}... ",
+            sb.prefix.join("Cellar/demo/1.0").display()
+        )),
+        "{out}"
+    );
+    assert_eq!(count_in(&out, "symlinks removed."), 1, "{out}");
+    assert!(!sb.prefix.join("bin/demo").exists(), "{out}");
+    assert!(
+        !sb.prefix.join("var/homebrew/linked/demo").exists(),
+        "{out}"
+    );
+}
+
 /// The trailing number of a `... N symlinks <verb>` line.
 fn count_in(text: &str, suffix: &str) -> usize {
     let line = text

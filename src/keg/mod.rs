@@ -167,25 +167,52 @@ pub fn installed_formula_names(cfg: &Config) -> Vec<String> {
 
 /// Keg currently linked (via `var/homebrew/linked`), falling back to the opt link, for `name`.
 pub fn linked_keg(cfg: &Config, name: &str) -> Option<Keg> {
-    for record in [cfg.linked_record(name), cfg.opt_record(name)] {
-        if !record.is_symlink() {
-            continue;
-        }
-        let Ok(target) = std::fs::canonicalize(&record) else {
-            continue;
-        };
-        let version = target.file_name()?.to_str()?.to_string();
-        let rack_name = target.parent()?.file_name()?.to_str()?.to_string();
-        if target.parent()?.parent()? != std::fs::canonicalize(&cfg.cellar).ok()?.as_path() {
-            continue;
-        }
-        return Some(Keg {
-            name: rack_name,
-            version: PkgVersion::parse(&version),
-            path: target,
-        });
+    [cfg.linked_record(name), cfg.opt_record(name)]
+        .into_iter()
+        .find_map(|record| keg_at_record(cfg, &record))
+}
+
+/// `NamedArgs#resolve_default_keg`: the keg a command that names a rack without
+/// a version operates on — the opt-linked keg, then the linked one, then the
+/// only installed keg, and only then the newest.
+///
+/// `unlink` resolves this way, so it removes the links that are actually there
+/// rather than those of whichever keg happens to sort highest.
+pub fn default_keg(cfg: &Config, name: &str) -> Option<Keg> {
+    if let Some(keg) = [cfg.opt_record(name), cfg.linked_record(name)]
+        .into_iter()
+        .find_map(|record| keg_at_record(cfg, &record))
+    {
+        return Some(keg);
     }
-    None
+    let kegs = installed_kegs(cfg, name);
+    if kegs.len() == 1 {
+        return kegs.into_iter().next();
+    }
+    kegs.into_iter().max_by(|a, b| a.version.cmp(&b.version))
+}
+
+/// The keg a prefix record (`opt/<name>`, `var/homebrew/linked/<name>`) points
+/// at, or `None` when it is absent, broken or points outside the Cellar.
+fn keg_at_record(cfg: &Config, record: &std::path::Path) -> Option<Keg> {
+    if !record.is_symlink() {
+        return None;
+    }
+    let target = std::fs::canonicalize(record).ok()?;
+    let version = target.file_name()?.to_str()?.to_string();
+    let rack_name = target.parent()?.file_name()?.to_str()?.to_string();
+    if target.parent()?.parent()? != std::fs::canonicalize(&cfg.cellar).ok()?.as_path() {
+        return None;
+    }
+    // The keg path is spelled the way the configured cellar is, not the way
+    // `realpath` would (`Utils::Path.resolved_path` expands the link but not
+    // its ancestors): every other path in the prefix is built that way, and
+    // the link bookkeeping compares them literally.
+    Some(Keg {
+        name: rack_name.clone(),
+        version: PkgVersion::parse(&version),
+        path: cfg.cellar.join(rack_name).join(version),
+    })
 }
 
 pub fn is_pinned(cfg: &Config, name: &str) -> bool {

@@ -338,7 +338,15 @@ pub fn link(ctx: &Ctx, args: &LinkArgs, link_it: bool) -> Result<()> {
             .as_ref()
             .map(|f| f.name.clone())
             .unwrap_or_else(|| name.rsplit('/').next().unwrap_or(name).to_string());
-        let keg = latest_keg(ctx, &short)?;
+        // `link` takes the newest keg (`resolve_latest_keg`), `unlink` the one
+        // whose records are actually in the prefix (`resolve_default_keg`).
+        let keg = if link_it {
+            latest_keg(ctx, &short)?
+        } else {
+            crate::keg::default_keg(&ctx.cfg, &short).ok_or_else(|| {
+                Error::user(format!("No such keg: {}", ctx.cfg.rack(&short).display()))
+            })?
+        };
         // Linking and unlinking rewrite the prefix records of this rack, so
         // they take the same lock every other destructive operation does. A
         // `--dry-run` only lists, so it stays lock-free.
