@@ -45,6 +45,15 @@ const HELLO: Bottle = Bottle {
     rebuild: 1,
     sha256: "ae6237e3001bd354783f469d754cee875ee9828910461b85a5803f5990213dde",
 };
+/// A `bottle_tag: ":all"` bottle: the manifest entry is `<version>.all` and the
+/// cache name carries the `all` tag. It is also `:any_skip_relocation` with a
+/// non-empty `changed_files`, so it proves the text step still runs there.
+const ACK: Bottle = Bottle {
+    name: "ack",
+    version: "3.10.0",
+    rebuild: 0,
+    sha256: "0f50e7b207da891500f42b5671413f290d4db5fea49943cfefcc74a3684760d9",
+};
 
 struct Bottle {
     name: &'static str,
@@ -251,6 +260,54 @@ fn pours_hello_without_relocation() {
     assert!(linked.is_symlink());
     assert_eq!(run(&linked, &["--greeting=fastbrew"]), "fastbrew");
     assert!(run(&linked, &["--version"]).starts_with("hello (GNU Hello) 2.12.3"));
+}
+
+#[test]
+fn pours_an_all_tag_skip_relocation_bottle() {
+    let Some(cfg) = sandbox() else { return };
+    if !network() {
+        return;
+    }
+
+    // The manifest is selected by `<version>.all` and cached under the `all`
+    // tag, exactly as Homebrew names it.
+    let reference = BottleRef {
+        tag: fastbrew::platform::BottleTag::all(),
+        ..ACK.reference(&cfg)
+    };
+    assert_eq!(reference.ref_name(), "3.10.0.all");
+    assert_eq!(reference.filename(), "ack--3.10.0.all.bottle.tar.gz");
+    let manifest = fetch::fetch_manifest(&cfg, &reference, true).expect("manifest");
+    assert_eq!(
+        manifest.tab.changed_files.as_deref(),
+        Some(&["bin/ack".to_string()][..])
+    );
+    let blob = fetch::fetch_blob(&cfg, &reference, true).expect("blob");
+    assert!(cfg.cache.join("ack--3.10.0").is_symlink());
+
+    let keg_path = extract::extract_bottle(&cfg, &blob, ACK.name, ACK.version, true).unwrap();
+    let report = relocate_keg(
+        &cfg,
+        RelocateArgs {
+            keg_path: &keg_path,
+            // `:any_skip_relocation`: no Mach-O work, but the text step must
+            // still expand `@@HOMEBREW_PERL@@` in the shebang.
+            cellar_kind: &BottleCellar::AnySkipRelocation,
+            tab: &manifest.tab,
+            openjdk_dep: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(report.text_files_changed, vec!["bin/ack".to_string()]);
+    assert!(report.macho_files_changed.is_empty());
+    let shebang = std::fs::read_to_string(keg_path.join("bin/ack")).unwrap();
+    let shebang = shebang.lines().next().unwrap().to_string();
+    // `ack` declares `perl` directly, so the brewed perl is used.
+    assert_eq!(
+        shebang,
+        format!("#!{}/opt/perl/bin/perl", cfg.prefix.display()),
+        "perl placeholder was not expanded"
+    );
 }
 
 #[test]
