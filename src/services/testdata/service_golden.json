@@ -1,0 +1,858 @@
+{
+  "unbound": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":require_root",
+        true
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/unbound/sbin/unbound",
+        "-d",
+        "-c",
+        "$HOMEBREW_PREFIX/etc/unbound/unbound.conf"
+      ]
+    ],
+    "stable_version": "1.26.0",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.unbound</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/unbound/sbin/unbound</string>\n\t\t<string>-d</string>\n\t\t<string>-c</string>\n\t\t<string>/opt/homebrew/etc/unbound/unbound.conf</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for unbound\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/unbound/sbin/unbound\" \"-d\" \"-c\" \"/opt/homebrew/etc/unbound/unbound.conf\"\nRestart=on-failure\n",
+    "expected_label": "homebrew.mxcl.unbound"
+  },
+  "black": {
+    "revision": 2,
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":working_dir",
+        "$HOMEBREW_PREFIX"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/blackd.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/blackd.log"
+      ],
+      [
+        ":require_root",
+        true
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      "$HOMEBREW_PREFIX/opt/black/bin/blackd"
+    ],
+    "stable_version": "26.5.1",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.black</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/black/bin/blackd</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/blackd.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/blackd.log</string>\n\t<key>WorkingDirectory</key>\n\t<string>/opt/homebrew</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for black\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/black/bin/blackd\"\nRestart=on-failure\nWorkingDirectory=/opt/homebrew\nStandardOutput=append:/opt/homebrew/var/log/blackd.log\nStandardError=append:/opt/homebrew/var/log/blackd.log\n",
+    "expected_label": "homebrew.mxcl.black"
+  },
+  "redis": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":working_dir",
+        "$HOMEBREW_PREFIX/var"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/redis.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/redis.log"
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/redis/bin/redis-server",
+        "$HOMEBREW_PREFIX/etc/redis.conf"
+      ]
+    ],
+    "stable_version": "8.10.1",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.redis</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/redis/bin/redis-server</string>\n\t\t<string>/opt/homebrew/etc/redis.conf</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/redis.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/redis.log</string>\n\t<key>WorkingDirectory</key>\n\t<string>/opt/homebrew/var</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for redis\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/redis/bin/redis-server\" \"/opt/homebrew/etc/redis.conf\"\nRestart=on-failure\nWorkingDirectory=/opt/homebrew/var\nStandardOutput=append:/opt/homebrew/var/log/redis.log\nStandardError=append:/opt/homebrew/var/log/redis.log\n",
+    "expected_label": "homebrew.mxcl.redis"
+  },
+  "postgresql@17": {
+    "service_args": [
+      [
+        ":environment_variables",
+        {
+          ":LC_ALL": "en_US.UTF-8"
+        }
+      ],
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":working_dir",
+        "$HOMEBREW_PREFIX"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/postgresql@17.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/postgresql@17.log"
+      ],
+      [
+        ":stop_timeout",
+        120
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/postgresql@17/bin/postgres",
+        "-D",
+        "$HOMEBREW_PREFIX/var/postgresql@17"
+      ]
+    ],
+    "stable_version": "17.11",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>LC_ALL</key>\n\t\t<string>en_US.UTF-8</string>\n\t</dict>\n\t<key>ExitTimeOut</key>\n\t<integer>120</integer>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.postgresql@17</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/postgresql@17/bin/postgres</string>\n\t\t<string>-D</string>\n\t\t<string>/opt/homebrew/var/postgresql@17</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/postgresql@17.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/postgresql@17.log</string>\n\t<key>WorkingDirectory</key>\n\t<string>/opt/homebrew</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for postgresql@17\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/postgresql@17/bin/postgres\" \"-D\" \"/opt/homebrew/var/postgresql@17\"\nRestart=on-failure\nTimeoutStopSec=120\nWorkingDirectory=/opt/homebrew\nStandardOutput=append:/opt/homebrew/var/log/postgresql@17.log\nStandardError=append:/opt/homebrew/var/log/postgresql@17.log\nEnvironment=\"LC_ALL=en_US.UTF-8\"\n",
+    "expected_label": "homebrew.mxcl.postgresql@17"
+  },
+  "dnsmasq": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":require_root",
+        true
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/dnsmasq/sbin/dnsmasq",
+        "--keep-in-foreground",
+        "-C",
+        "$HOMEBREW_PREFIX/etc/dnsmasq.conf",
+        "-7",
+        "$HOMEBREW_PREFIX/etc/dnsmasq.d,*.conf"
+      ]
+    ],
+    "stable_version": "2.93",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.dnsmasq</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/dnsmasq/sbin/dnsmasq</string>\n\t\t<string>--keep-in-foreground</string>\n\t\t<string>-C</string>\n\t\t<string>/opt/homebrew/etc/dnsmasq.conf</string>\n\t\t<string>-7</string>\n\t\t<string>/opt/homebrew/etc/dnsmasq.d,*.conf</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for dnsmasq\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/dnsmasq/sbin/dnsmasq\" \"--keep-in-foreground\" \"-C\" \"/opt/homebrew/etc/dnsmasq.conf\" \"-7\" \"/opt/homebrew/etc/dnsmasq.d,*.conf\"\nRestart=on-failure\n",
+    "expected_label": "homebrew.mxcl.dnsmasq"
+  },
+  "nginx": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":working_dir",
+        "$HOMEBREW_PREFIX"
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": false
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/nginx/bin/nginx",
+        "-g",
+        "daemon off;"
+      ]
+    ],
+    "stable_version": "1.31.5",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.nginx</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/nginx/bin/nginx</string>\n\t\t<string>-g</string>\n\t\t<string>daemon off;</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>WorkingDirectory</key>\n\t<string>/opt/homebrew</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for nginx\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/nginx/bin/nginx\" \"-g\" \"daemon off;\"\nWorkingDirectory=/opt/homebrew\n",
+    "expected_label": "homebrew.mxcl.nginx"
+  },
+  "php": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":working_dir",
+        "$HOMEBREW_PREFIX/var"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/php-fpm.log"
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/php/sbin/php-fpm",
+        "--nodaemonize"
+      ]
+    ],
+    "stable_version": "8.5.10",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.php</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/php/sbin/php-fpm</string>\n\t\t<string>--nodaemonize</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/php-fpm.log</string>\n\t<key>WorkingDirectory</key>\n\t<string>/opt/homebrew/var</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for php\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/php/sbin/php-fpm\" \"--nodaemonize\"\nRestart=on-failure\nWorkingDirectory=/opt/homebrew/var\nStandardError=append:/opt/homebrew/var/log/php-fpm.log\n",
+    "expected_label": "homebrew.mxcl.php"
+  },
+  "mysql": {
+    "revision": 1,
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":working_dir",
+        "$HOMEBREW_PREFIX/var/mysql"
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/mysql/bin/mysqld_safe",
+        "--datadir=$HOMEBREW_PREFIX/var/mysql"
+      ]
+    ],
+    "stable_version": "26.7.0",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.mysql</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/mysql/bin/mysqld_safe</string>\n\t\t<string>--datadir=/opt/homebrew/var/mysql</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>WorkingDirectory</key>\n\t<string>/opt/homebrew/var/mysql</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for mysql\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/mysql/bin/mysqld_safe\" \"--datadir=/opt/homebrew/var/mysql\"\nRestart=on-failure\nWorkingDirectory=/opt/homebrew/var/mysql\n",
+    "expected_label": "homebrew.mxcl.mysql"
+  },
+  "automysqlbackup": {
+    "service_args": [
+      [
+        ":run_type",
+        ":cron"
+      ],
+      [
+        ":working_dir",
+        "$HOMEBREW_PREFIX"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/automysqlbackup.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/automysqlbackup.log"
+      ],
+      [
+        ":cron",
+        "0 4 * * *"
+      ]
+    ],
+    "service_run_args": [
+      "$HOMEBREW_PREFIX/opt/automysqlbackup/sbin/automysqlbackup"
+    ],
+    "stable_version": "3.0-rc6",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.automysqlbackup</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/automysqlbackup/sbin/automysqlbackup</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/automysqlbackup.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/automysqlbackup.log</string>\n\t<key>StartCalendarInterval</key>\n\t<dict>\n\t\t<key>Hour</key>\n\t\t<integer>4</integer>\n\t\t<key>Minute</key>\n\t\t<integer>0</integer>\n\t</dict>\n\t<key>WorkingDirectory</key>\n\t<string>/opt/homebrew</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for automysqlbackup\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/automysqlbackup/sbin/automysqlbackup\"\nWorkingDirectory=/opt/homebrew\nStandardOutput=append:/opt/homebrew/var/log/automysqlbackup.log\nStandardError=append:/opt/homebrew/var/log/automysqlbackup.log\n",
+    "expected_label": "homebrew.mxcl.automysqlbackup"
+  },
+  "logrotate": {
+    "service_args": [
+      [
+        ":run_type",
+        ":cron"
+      ],
+      [
+        ":cron",
+        "25 6 * * *"
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/logrotate/sbin/logrotate",
+        "$HOMEBREW_PREFIX/etc/logrotate.conf"
+      ]
+    ],
+    "stable_version": "3.22.0",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.logrotate</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/logrotate/sbin/logrotate</string>\n\t\t<string>/opt/homebrew/etc/logrotate.conf</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StartCalendarInterval</key>\n\t<dict>\n\t\t<key>Hour</key>\n\t\t<integer>6</integer>\n\t\t<key>Minute</key>\n\t\t<integer>25</integer>\n\t</dict>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for logrotate\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/logrotate/sbin/logrotate\" \"/opt/homebrew/etc/logrotate.conf\"\n",
+    "expected_label": "homebrew.mxcl.logrotate"
+  },
+  "znc": {
+    "revision": 1,
+    "service_args": [
+      [
+        ":run_type",
+        ":interval"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/znc.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/znc.log"
+      ],
+      [
+        ":interval",
+        300
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/znc/bin/znc",
+        "--foreground"
+      ]
+    ],
+    "stable_version": "1.10.2",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.znc</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/znc/bin/znc</string>\n\t\t<string>--foreground</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/znc.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/znc.log</string>\n\t<key>StartInterval</key>\n\t<integer>300</integer>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for znc\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/znc/bin/znc\" \"--foreground\"\nStandardOutput=append:/opt/homebrew/var/log/znc.log\nStandardError=append:/opt/homebrew/var/log/znc.log\n",
+    "expected_label": "homebrew.mxcl.znc"
+  },
+  "launch_socket_server": {
+    "service_args": [
+      [
+        ":environment_variables",
+        {
+          ":LAUNCH_PROGRAM_TCP_ADDRESS": "127.0.0.1:8080"
+        }
+      ],
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/launch_socket_server.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/launch_socket_server.log"
+      ],
+      [
+        ":require_root",
+        true
+      ],
+      [
+        ":sockets",
+        {
+          ":Socket": "tcp://127.0.0.1:80"
+        }
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/launch_socket_server/sbin/launch_socket_server",
+        "-"
+      ]
+    ],
+    "stable_version": "2.0.0",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>LAUNCH_PROGRAM_TCP_ADDRESS</key>\n\t\t<string>127.0.0.1:8080</string>\n\t</dict>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.launch_socket_server</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/launch_socket_server/sbin/launch_socket_server</string>\n\t\t<string>-</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>Sockets</key>\n\t<dict>\n\t\t<key>Socket</key>\n\t\t<dict>\n\t\t\t<key>SockNodeName</key>\n\t\t\t<string>127.0.0.1</string>\n\t\t\t<key>SockProtocol</key>\n\t\t\t<string>TCP</string>\n\t\t\t<key>SockServiceName</key>\n\t\t\t<string>80</string>\n\t\t</dict>\n\t</dict>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/launch_socket_server.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/launch_socket_server.log</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for launch_socket_server\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/launch_socket_server/sbin/launch_socket_server\" \"-\"\nRestart=on-failure\nStandardOutput=append:/opt/homebrew/var/log/launch_socket_server.log\nStandardError=append:/opt/homebrew/var/log/launch_socket_server.log\nEnvironment=\"LAUNCH_PROGRAM_TCP_ADDRESS=127.0.0.1:8080\"\n",
+    "expected_label": "homebrew.mxcl.launch_socket_server"
+  },
+  "bitlbee": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":sockets",
+        "tcp://127.0.0.1:6667"
+      ]
+    ],
+    "service_run_args": [
+      "$HOMEBREW_PREFIX/opt/bitlbee/sbin/bitlbee"
+    ],
+    "stable_version": "3.6",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.bitlbee</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/bitlbee/sbin/bitlbee</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>Sockets</key>\n\t<dict>\n\t\t<key>listeners</key>\n\t\t<dict>\n\t\t\t<key>SockNodeName</key>\n\t\t\t<string>127.0.0.1</string>\n\t\t\t<key>SockProtocol</key>\n\t\t\t<string>TCP</string>\n\t\t\t<key>SockServiceName</key>\n\t\t\t<string>6667</string>\n\t\t</dict>\n\t</dict>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for bitlbee\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/bitlbee/sbin/bitlbee\"\n",
+    "expected_label": "homebrew.mxcl.bitlbee"
+  },
+  "mactop": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":process_type",
+        ":background"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/mactop.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/mactop.error.log"
+      ],
+      [
+        ":nice",
+        10
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/mactop/bin/mactop",
+        "-p",
+        "9101",
+        "--headless"
+      ]
+    ],
+    "stable_version": "2.1.5",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.mactop</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>Nice</key>\n\t<integer>10</integer>\n\t<key>ProcessType</key>\n\t<string>Background</string>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/mactop/bin/mactop</string>\n\t\t<string>-p</string>\n\t\t<string>9101</string>\n\t\t<string>--headless</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/mactop.error.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/mactop.log</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for mactop\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/mactop/bin/mactop\" \"-p\" \"9101\" \"--headless\"\nRestart=on-failure\nNice=10\nStandardOutput=append:/opt/homebrew/var/log/mactop.log\nStandardError=append:/opt/homebrew/var/log/mactop.error.log\n",
+    "expected_label": "homebrew.mxcl.mactop"
+  },
+  "wildfly-as": {
+    "service_args": [
+      [
+        ":environment_variables",
+        {
+          ":JBOSS_HOME": "$HOMEBREW_PREFIX/opt/wildfly-as/libexec",
+          ":WILDFLY_HOME": "$HOMEBREW_PREFIX/opt/wildfly-as/libexec"
+        }
+      ],
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":keep_alive",
+        {
+          ":successful_exit": false,
+          ":crashed": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/wildfly-as/libexec/bin/standalone.sh",
+        "--server-config=standalone.xml"
+      ]
+    ],
+    "stable_version": "41.0.1",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>JBOSS_HOME</key>\n\t\t<string>/opt/homebrew/opt/wildfly-as/libexec</string>\n\t\t<key>WILDFLY_HOME</key>\n\t\t<string>/opt/homebrew/opt/wildfly-as/libexec</string>\n\t</dict>\n\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.wildfly-as</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/wildfly-as/libexec/bin/standalone.sh</string>\n\t\t<string>--server-config=standalone.xml</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for wildfly-as\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/wildfly-as/libexec/bin/standalone.sh\" \"--server-config=standalone.xml\"\nRestart=on-failure\nEnvironment=\"JBOSS_HOME=/opt/homebrew/opt/wildfly-as/libexec\"\nEnvironment=\"WILDFLY_HOME=/opt/homebrew/opt/wildfly-as/libexec\"\n",
+    "expected_label": "homebrew.mxcl.wildfly-as"
+  },
+  "colima": {
+    "service_args": [
+      [
+        ":environment_variables",
+        {
+          ":PATH": "$HOMEBREW_PREFIX/bin:$HOMEBREW_PREFIX/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+        }
+      ],
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":working_dir",
+        "/$HOME"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/colima.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/colima.log"
+      ],
+      [
+        ":keep_alive",
+        {
+          ":successful_exit": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/colima/bin/colima",
+        "start",
+        "-f"
+      ]
+    ],
+    "stable_version": "0.10.3",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n\t</dict>\n\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<true/>\n\t</dict>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.colima</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/colima/bin/colima</string>\n\t\t<string>start</string>\n\t\t<string>-f</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/colima.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/colima.log</string>\n\t<key>WorkingDirectory</key>\n\t<string>/Users/fastbrew</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for colima\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/colima/bin/colima\" \"start\" \"-f\"\nRestart=on-success\nWorkingDirectory=/Users/fastbrew\nStandardOutput=append:/opt/homebrew/var/log/colima.log\nStandardError=append:/opt/homebrew/var/log/colima.log\nEnvironment=\"PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin\"\n",
+    "expected_label": "homebrew.mxcl.colima"
+  },
+  "gitlab-runner": {
+    "service_args": [
+      [
+        ":environment_variables",
+        {
+          ":PATH": "$HOMEBREW_PREFIX/bin:$HOMEBREW_PREFIX/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+        }
+      ],
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":process_type",
+        ":interactive"
+      ],
+      [
+        ":working_dir",
+        "/$HOME"
+      ],
+      [
+        ":macos_legacy_timers",
+        true
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/gitlab-runner/bin/gitlab-runner",
+        "run",
+        "--syslog"
+      ]
+    ],
+    "stable_version": "19.3.2",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n\t</dict>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.gitlab-runner</string>\n\t<key>LegacyTimers</key>\n\t<true/>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProcessType</key>\n\t<string>Interactive</string>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/gitlab-runner/bin/gitlab-runner</string>\n\t\t<string>run</string>\n\t\t<string>--syslog</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>WorkingDirectory</key>\n\t<string>/Users/fastbrew</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for gitlab-runner\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/gitlab-runner/bin/gitlab-runner\" \"run\" \"--syslog\"\nRestart=on-failure\nWorkingDirectory=/Users/fastbrew\nEnvironment=\"PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin\"\n",
+    "expected_label": "homebrew.mxcl.gitlab-runner"
+  },
+  "knot": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":input_path",
+        "/dev/null"
+      ],
+      [
+        ":log_path",
+        "/dev/null"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/knot.log"
+      ],
+      [
+        ":require_root",
+        true
+      ]
+    ],
+    "service_run_args": [
+      "$HOMEBREW_PREFIX/opt/knot/sbin/knotd"
+    ],
+    "stable_version": "3.6.0",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.knot</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/knot/sbin/knotd</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/knot.log</string>\n\t<key>StandardInPath</key>\n\t<string>/dev/null</string>\n\t<key>StandardOutPath</key>\n\t<string>/dev/null</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for knot\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/knot/sbin/knotd\"\nStandardInput=file:/dev/null\nStandardOutput=append:/dev/null\nStandardError=append:/opt/homebrew/var/log/knot.log\n",
+    "expected_label": "homebrew.mxcl.knot"
+  },
+  "tkey-ssh-agent": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/tkey-ssh-agent.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/tkey-ssh-agent.log"
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_kwargs": {
+      ":macos": [
+        "$HOMEBREW_PREFIX/opt/tkey-ssh-agent/bin/tkey-ssh-agent",
+        "--agent-socket",
+        "$HOMEBREW_PREFIX/var/run/tkey-ssh-agent.sock",
+        "--uss",
+        "--pinentry",
+        "$HOMEBREW_PREFIX/bin/pinentry-mac"
+      ],
+      ":linux": [
+        "$HOMEBREW_PREFIX/opt/tkey-ssh-agent/bin/tkey-ssh-agent",
+        "--agent-socket",
+        "$HOMEBREW_PREFIX/var/run/tkey-ssh-agent.sock",
+        "--uss"
+      ]
+    },
+    "stable_version": "1.1.1",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.tkey-ssh-agent</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/tkey-ssh-agent/bin/tkey-ssh-agent</string>\n\t\t<string>--agent-socket</string>\n\t\t<string>/opt/homebrew/var/run/tkey-ssh-agent.sock</string>\n\t\t<string>--uss</string>\n\t\t<string>--pinentry</string>\n\t\t<string>/opt/homebrew/bin/pinentry-mac</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/tkey-ssh-agent.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/tkey-ssh-agent.log</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for tkey-ssh-agent\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/tkey-ssh-agent/bin/tkey-ssh-agent\" \"--agent-socket\" \"/opt/homebrew/var/run/tkey-ssh-agent.sock\" \"--uss\" \"--pinentry\" \"/opt/homebrew/bin/pinentry-mac\"\nRestart=on-failure\nStandardOutput=append:/opt/homebrew/var/log/tkey-ssh-agent.log\nStandardError=append:/opt/homebrew/var/log/tkey-ssh-agent.log\n",
+    "expected_label": "homebrew.mxcl.tkey-ssh-agent"
+  },
+  "rabbitmq": {
+    "service_args": [
+      [
+        ":environment_variables",
+        {
+          ":PATH": "$HOMEBREW_PREFIX/sbin:/usr/sbin:/usr/bin:/bin:$HOMEBREW_PREFIX/bin",
+          ":CONF_ENV_FILE": "$HOMEBREW_PREFIX/etc/rabbitmq/rabbitmq-env.conf"
+        }
+      ],
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/rabbitmq/std_out.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/rabbitmq/std_error.log"
+      ]
+    ],
+    "service_run_args": [
+      "$HOMEBREW_PREFIX/opt/rabbitmq/sbin/rabbitmq-server"
+    ],
+    "stable_version": "4.3.5",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>CONF_ENV_FILE</key>\n\t\t<string>/opt/homebrew/etc/rabbitmq/rabbitmq-env.conf</string>\n\t\t<key>PATH</key>\n\t\t<string>/opt/homebrew/sbin:/usr/sbin:/usr/bin:/bin:/opt/homebrew/bin</string>\n\t</dict>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.rabbitmq</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/rabbitmq/sbin/rabbitmq-server</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/rabbitmq/std_error.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/rabbitmq/std_out.log</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for rabbitmq\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/rabbitmq/sbin/rabbitmq-server\"\nStandardOutput=append:/opt/homebrew/var/log/rabbitmq/std_out.log\nStandardError=append:/opt/homebrew/var/log/rabbitmq/std_error.log\nEnvironment=\"PATH=/opt/homebrew/sbin:/usr/sbin:/usr/bin:/bin:/opt/homebrew/bin\"\nEnvironment=\"CONF_ENV_FILE=/opt/homebrew/etc/rabbitmq/rabbitmq-env.conf\"\n",
+    "expected_label": "homebrew.mxcl.rabbitmq"
+  },
+  "cloudflared": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/cloudflared.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/cloudflared.log"
+      ],
+      [
+        ":keep_alive",
+        {
+          ":successful_exit": false
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/cloudflared/bin/cloudflared"
+      ]
+    ],
+    "stable_version": "2026.9.1",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.cloudflared</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/cloudflared/bin/cloudflared</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/cloudflared.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/cloudflared.log</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for cloudflared\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/cloudflared/bin/cloudflared\"\nStandardOutput=append:/opt/homebrew/var/log/cloudflared.log\nStandardError=append:/opt/homebrew/var/log/cloudflared.log\n",
+    "expected_label": "homebrew.mxcl.cloudflared"
+  },
+  "snx-rs": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/snx-rs.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/snx-rs.log"
+      ],
+      [
+        ":require_root",
+        true
+      ],
+      [
+        ":keep_alive",
+        {
+          ":crashed": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/snx-rs/bin/snx-rs",
+        "-m",
+        "command",
+        "-l",
+        "info"
+      ]
+    ],
+    "stable_version": "6.3.0",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>Crashed</key>\n\t\t<true/>\n\t</dict>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.snx-rs</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/snx-rs/bin/snx-rs</string>\n\t\t<string>-m</string>\n\t\t<string>command</string>\n\t\t<string>-l</string>\n\t\t<string>info</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/snx-rs.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/snx-rs.log</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for snx-rs\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/snx-rs/bin/snx-rs\" \"-m\" \"command\" \"-l\" \"info\"\nRestart=on-failure\nStandardOutput=append:/opt/homebrew/var/log/snx-rs.log\nStandardError=append:/opt/homebrew/var/log/snx-rs.log\n",
+    "expected_label": "homebrew.mxcl.snx-rs"
+  },
+  "mpd": {
+    "revision": 3,
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":process_type",
+        ":interactive"
+      ],
+      [
+        ":working_dir",
+        "$HOMEBREW_PREFIX"
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/mpd/bin/mpd",
+        "--no-daemon"
+      ]
+    ],
+    "stable_version": "0.24.15",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.mpd</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProcessType</key>\n\t<string>Interactive</string>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/mpd/bin/mpd</string>\n\t\t<string>--no-daemon</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>WorkingDirectory</key>\n\t<string>/opt/homebrew</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for mpd\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/mpd/bin/mpd\" \"--no-daemon\"\nRestart=on-failure\nWorkingDirectory=/opt/homebrew\n",
+    "expected_label": "homebrew.mxcl.mpd"
+  },
+  "jenkins-lts": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/openjdk@21/bin/java",
+        "-Dmail.smtp.starttls.enable=true",
+        "-jar",
+        "$HOMEBREW_PREFIX/opt/jenkins-lts/libexec/jenkins.war",
+        "--httpListenAddress=127.0.0.1",
+        "--httpPort=8080"
+      ]
+    ],
+    "stable_version": "2.568.3",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.jenkins-lts</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/openjdk@21/bin/java</string>\n\t\t<string>-Dmail.smtp.starttls.enable=true</string>\n\t\t<string>-jar</string>\n\t\t<string>/opt/homebrew/opt/jenkins-lts/libexec/jenkins.war</string>\n\t\t<string>--httpListenAddress=127.0.0.1</string>\n\t\t<string>--httpPort=8080</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for jenkins-lts\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/openjdk@21/bin/java\" \"-Dmail.smtp.starttls.enable=true\" \"-jar\" \"/opt/homebrew/opt/jenkins-lts/libexec/jenkins.war\" \"--httpListenAddress=127.0.0.1\" \"--httpPort=8080\"\n",
+    "expected_label": "homebrew.mxcl.jenkins-lts"
+  },
+  "grafana": {
+    "service_args": [
+      [
+        ":run_type",
+        ":immediate"
+      ],
+      [
+        ":working_dir",
+        "$HOMEBREW_PREFIX/var/lib/grafana"
+      ],
+      [
+        ":log_path",
+        "$HOMEBREW_PREFIX/var/log/grafana-stdout.log"
+      ],
+      [
+        ":error_log_path",
+        "$HOMEBREW_PREFIX/var/log/grafana-stderr.log"
+      ],
+      [
+        ":keep_alive",
+        {
+          ":always": true
+        }
+      ]
+    ],
+    "service_run_args": [
+      [
+        "$HOMEBREW_PREFIX/opt/grafana/bin/grafana",
+        "server",
+        "--config",
+        "$HOMEBREW_PREFIX/etc/grafana/grafana.ini",
+        "--homepath",
+        "$HOMEBREW_PREFIX/opt/grafana/share/grafana",
+        "--packaging=brew",
+        "cfg:default.paths.logs=$HOMEBREW_PREFIX/var/log/grafana",
+        "cfg:default.paths.data=$HOMEBREW_PREFIX/var/lib/grafana",
+        "cfg:default.paths.plugins=$HOMEBREW_PREFIX/var/lib/grafana/plugins"
+      ]
+    ],
+    "stable_version": "13.2.1",
+    "expected_plist": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>Label</key>\n\t<string>homebrew.mxcl.grafana</string>\n\t<key>LimitLoadToSessionType</key>\n\t<array>\n\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t\t<string>LoginWindow</string>\n\t\t<string>StandardIO</string>\n\t\t<string>System</string>\n\t</array>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/homebrew/opt/grafana/bin/grafana</string>\n\t\t<string>server</string>\n\t\t<string>--config</string>\n\t\t<string>/opt/homebrew/etc/grafana/grafana.ini</string>\n\t\t<string>--homepath</string>\n\t\t<string>/opt/homebrew/opt/grafana/share/grafana</string>\n\t\t<string>--packaging=brew</string>\n\t\t<string>cfg:default.paths.logs=/opt/homebrew/var/log/grafana</string>\n\t\t<string>cfg:default.paths.data=/opt/homebrew/var/lib/grafana</string>\n\t\t<string>cfg:default.paths.plugins=/opt/homebrew/var/lib/grafana/plugins</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>StandardErrorPath</key>\n\t<string>/opt/homebrew/var/log/grafana-stderr.log</string>\n\t<key>StandardOutPath</key>\n\t<string>/opt/homebrew/var/log/grafana-stdout.log</string>\n\t<key>WorkingDirectory</key>\n\t<string>/opt/homebrew/var/lib/grafana</string>\n</dict>\n</plist>\n",
+    "expected_systemd": "[Unit]\nDescription=Homebrew generated unit for grafana\n\n[Install]\nWantedBy=default.target\n\n[Service]\nType=simple\nExecStart=\"/opt/homebrew/opt/grafana/bin/grafana\" \"server\" \"--config\" \"/opt/homebrew/etc/grafana/grafana.ini\" \"--homepath\" \"/opt/homebrew/opt/grafana/share/grafana\" \"--packaging=brew\" \"cfg:default.paths.logs=/opt/homebrew/var/log/grafana\" \"cfg:default.paths.data=/opt/homebrew/var/lib/grafana\" \"cfg:default.paths.plugins=/opt/homebrew/var/lib/grafana/plugins\"\nRestart=on-failure\nWorkingDirectory=/opt/homebrew/var/lib/grafana\nStandardOutput=append:/opt/homebrew/var/log/grafana-stdout.log\nStandardError=append:/opt/homebrew/var/log/grafana-stderr.log\n",
+    "expected_label": "homebrew.mxcl.grafana"
+  }
+}

@@ -50,6 +50,9 @@ pub struct FormulaEntry {
     pub service_args: Vec<Value>,
     pub service_run_args: Vec<Value>,
     pub service_run_kwargs: Option<Value>,
+    /// The payload stores this as a bare hash (`{":macos": "label"}`), not an
+    /// array; `one_or_many` accepts both and always yields a list.
+    #[serde(deserialize_with = "one_or_many")]
     pub service_name_args: Vec<Value>,
     pub keg_only_args: Vec<Value>,
     pub aliases: Vec<String>,
@@ -297,6 +300,19 @@ fn parse_deprecate(v: &Value) -> Option<DeprecateDisable> {
         because: get(":because"),
         replacement_formula: get(":replacement_formula"),
         replacement_cask: get(":replacement_cask"),
+    })
+}
+
+/// Accept either a single value or a list of them, always producing a list.
+/// Used for payload fields whose Ruby DSL takes keyword arguments only.
+fn one_or_many<'de, D>(deserializer: D) -> std::result::Result<Vec<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Null => vec![],
+        Value::Array(a) => a,
+        other => vec![other],
     })
 }
 
