@@ -15,6 +15,9 @@ pub enum Error {
         name: String,
         kind: PackageKind,
         suggestions: Vec<String>,
+        /// `FormulaUnavailableError#dependent`: the formula that pulled this
+        /// name in, when it was reached as a dependency.
+        dependent: Option<String>,
     },
     /// The command must be handled by the Ruby `brew` (see `delegate`).
     NeedsDelegation { reason: String },
@@ -42,12 +45,18 @@ impl fmt::Display for Error {
                 name,
                 kind,
                 suggestions,
+                dependent,
             } => {
                 let what = match kind {
                     PackageKind::Formula => "formula",
                     PackageKind::Cask => "cask",
                 };
-                write!(f, "No available {what} with the name \"{name}\".")?;
+                // `FormulaUnavailableError#dependent_s`.
+                let of = match dependent {
+                    Some(d) if d != name => format!(" (dependency of {d})"),
+                    _ => String::new(),
+                };
+                write!(f, "No available {what} with the name \"{name}\"{of}.")?;
                 if !suggestions.is_empty() {
                     // `Utils::Text.to_sentence(..., conjunction: "or")`.
                     write!(
