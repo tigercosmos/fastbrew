@@ -520,9 +520,15 @@ fn update_refreshes_the_api_file() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // All three `output_update_report` outcomes are legitimate here: the
+    // cached file may be current (304), or the fetch may bring a new
+    // generation with or without package changes.
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.contains("Already up-to-date.") || text.contains("==>"),
+        text.contains("Already up-to-date.")
+            || text.contains("No changes to formulae or casks.")
+            || text.contains("Updated ")
+            || text.contains("==>"),
         "{text}"
     );
 }

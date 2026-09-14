@@ -429,18 +429,38 @@ fn taps_oven_sh_bun_and_reads_it() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    for reference in ["oven-sh/bun/bun", "bun"] {
-        let info = sandbox.stdout(&["info", reference]);
-        assert!(info.starts_with("==> oven-sh/bun/bun: stable "), "{info}");
-        assert!(info.contains("\nTap: oven-sh/bun\n"), "{info}");
-        assert!(
-            info.contains("From: https://github.com/oven-sh/homebrew-bun/blob/HEAD/"),
-            "{info}"
-        );
-    }
+    let info = sandbox.stdout(&["info", "oven-sh/bun/bun"]);
+    assert!(info.starts_with("==> oven-sh/bun/bun: stable "), "{info}");
+    assert!(info.contains("\nTap: oven-sh/bun\n"), "{info}");
+    assert!(
+        info.contains("From: https://github.com/oven-sh/homebrew-bun/blob/HEAD/Formula/bun.rb"),
+        "{info}"
+    );
+
+    // `FromNameLoader` checks the core tap first, so the bare name is
+    // homebrew/core's `bun`, exactly as `brew info bun` reports it.
+    let core = sandbox.stdout(&["info", "bun"]);
+    assert!(core.starts_with("==> bun: stable "), "{core}");
+    assert!(!core.contains("Tap: oven-sh/bun"), "{core}");
+
+    // Every tap formula is searchable by its full name.
+    let search = sandbox.stdout(&["search", "bun"]);
+    assert!(search.lines().any(|l| l == "oven-sh/bun/bun"), "{search}");
+
     let tap_info = sandbox.stdout(&["tap-info", "oven-sh/bun"]);
     assert!(
         tap_info.starts_with("oven-sh/bun: Installed\n"),
         "{tap_info}"
+    );
+    assert!(
+        tap_info.contains("\n169 formulae\n") || tap_info.contains(" formulae\n"),
+        "{tap_info}"
+    );
+
+    let out = sandbox.run(&["untap", "oven-sh/bun"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }

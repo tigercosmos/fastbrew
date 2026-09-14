@@ -44,7 +44,8 @@ fn partition(ctx: &Ctx, names: &[String], kind: Kind) -> Result<(Vec<String>, Ve
 pub struct InstallArgs {
     #[arg(value_name = "formula|cask", required = true)]
     pub names: Vec<String>,
-    #[arg(long, visible_alias = "formulae")]
+    // Homebrew: `conflicts "--formula", "--cask"`.
+    #[arg(long, visible_alias = "formulae", conflicts_with = "cask")]
     pub formula: bool,
     #[arg(long, visible_alias = "casks")]
     pub cask: bool,
@@ -148,7 +149,8 @@ fn cask_options(ctx: &Ctx, args: &InstallArgs, reinstall: bool) -> CaskInstallOp
 pub struct UpgradeArgs {
     #[arg(value_name = "formula|cask")]
     pub names: Vec<String>,
-    #[arg(long, visible_alias = "formulae")]
+    // Homebrew: `conflicts "--formula", "--cask"`.
+    #[arg(long, visible_alias = "formulae", conflicts_with = "cask")]
     pub formula: bool,
     #[arg(long, visible_alias = "casks")]
     pub cask: bool,
@@ -194,7 +196,8 @@ pub fn upgrade(ctx: &Ctx, args: &UpgradeArgs) -> Result<()> {
 pub struct UninstallArgs {
     #[arg(value_name = "formula|cask", required = true)]
     pub names: Vec<String>,
-    #[arg(long, visible_alias = "formulae")]
+    // Homebrew: `conflicts "--formula", "--cask"`.
+    #[arg(long, visible_alias = "formulae", conflicts_with = "cask")]
     pub formula: bool,
     #[arg(long, visible_alias = "casks")]
     pub cask: bool,
@@ -286,7 +289,8 @@ pub struct LinkArgs {
     /// List the files that would be linked or deleted.
     #[arg(short = 'n', long)]
     pub dry_run: bool,
-    #[arg(long, visible_alias = "formulae")]
+    // Homebrew: `conflicts "--formula", "--cask"`.
+    #[arg(long, visible_alias = "formulae", conflicts_with = "cask")]
     pub formula: bool,
     /// Link a cask's binaries, manpages and completions (delegates to brew).
     #[arg(long, visible_alias = "casks")]
@@ -479,7 +483,8 @@ fn prepend_path_in_profile(path: &str) -> String {
 pub struct PinArgs {
     #[arg(value_name = "formula", required = true)]
     pub names: Vec<String>,
-    #[arg(long, visible_alias = "formulae")]
+    // Homebrew: `conflicts "--formula", "--cask"`.
+    #[arg(long, visible_alias = "formulae", conflicts_with = "cask")]
     pub formula: bool,
     /// Pin a cask (delegates to brew).
     #[arg(long, visible_alias = "casks")]
@@ -538,7 +543,8 @@ pub fn postinstall(ctx: &Ctx, args: &PostinstallArgs) -> Result<()> {
 pub struct FetchArgs {
     #[arg(value_name = "formula|cask", required = true)]
     pub names: Vec<String>,
-    #[arg(long, visible_alias = "formulae")]
+    // Homebrew: `conflicts "--formula", "--cask"`.
+    #[arg(long, visible_alias = "formulae", conflicts_with = "cask")]
     pub formula: bool,
     #[arg(long, visible_alias = "casks")]
     pub cask: bool,

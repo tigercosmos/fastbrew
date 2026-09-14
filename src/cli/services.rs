@@ -76,6 +76,21 @@ pub fn services(ctx: &Ctx, args: &ServicesArgs) -> Result<()> {
     };
     let sudo = args.sudo_service_user.is_some();
 
+    // Flags whose semantics fastbrew does not implement would change what the
+    // command does, so they go to the Ruby `brew` rather than being ignored.
+    for (set, flag) in [
+        (args.file.is_some(), "--file"),
+        (args.keep, "--keep"),
+        (args.no_wait, "--no-wait"),
+        (args.max_wait.is_some(), "--max-wait"),
+    ] {
+        if set {
+            return ctx.delegate(&format!(
+                "`services {sub} {flag}` is not implemented by fastbrew"
+            ));
+        }
+    }
+
     match sub {
         "list" => list(ctx, args),
         "info" => info(ctx, args, &names),
