@@ -237,11 +237,14 @@ impl FormulaEntry {
             .collect()
     }
 
+    /// `Formula#deprecated?`.
     pub fn is_deprecated(&self) -> bool {
-        self.deprecate_args.is_some()
+        self.deprecate_disable().is_some_and(|s| s.deprecated)
     }
+
+    /// `Formula#disabled?`.
     pub fn is_disabled(&self) -> bool {
-        self.disable_args.is_some()
+        self.deprecate_disable().is_some_and(|s| s.disabled)
     }
 
     /// `deprecate!`/`disable!` message body: `deprecated because it <reason>!` style text is built by callers.
@@ -251,6 +254,60 @@ impl FormulaEntry {
 
     pub fn disablement(&self) -> Option<DeprecateDisable> {
         parse_deprecate(self.disable_args.as_ref()?)
+    }
+
+    /// The two stanzas combined the way `Formula#deprecate!`/`#disable!` and
+    /// `DeprecateDisable.message` do, or `None` when neither is present.
+    ///
+    /// `disable!` with a date that has not arrived yet only deprecates the
+    /// formula (`formula.rb#disable!`), so the date decides whether an install
+    /// is refused or merely warned about.
+    pub fn deprecate_disable(&self) -> Option<DeprecateDisableStatus> {
+        let deprecate = self.deprecation();
+        let disable = self.disablement();
+        if deprecate.is_none() && disable.is_none() {
+            return None;
+        }
+        let disable_date = disable
+            .as_ref()
+            .and_then(|d| d.date.clone())
+            .filter(|d| !d.is_empty());
+        let disabled = disable.is_some()
+            && disable_date
+                .as_deref()
+                .is_none_or(|d| d.to_string() <= today());
+        let deprecated = deprecate.is_some() || !disabled;
+        // `DeprecateDisable.message` reads `deprecation_reason` whenever the
+        // formula is deprecated at all, and `deprecate!`'s fields win when it
+        // is present; otherwise the future `disable!` branch copies its own
+        // reason across. The replacement comes from `disable!` first.
+        let reason_source = if deprecated {
+            deprecate.as_ref().or(disable.as_ref())
+        } else {
+            disable.as_ref()
+        };
+        let replacement_source = if disabled {
+            disable.as_ref()
+        } else {
+            deprecate.as_ref().or(disable.as_ref())
+        };
+        // `DeprecateDisable.message` falls back to one year after the
+        // deprecation date (`REMOVE_DISABLED_TIME_WINDOW`).
+        let date = disable_date.or_else(|| {
+            deprecate
+                .as_ref()
+                .and_then(|d| d.date.as_deref())
+                .filter(|d| !d.is_empty())
+                .map(plus_twelve_months)
+        });
+        Some(DeprecateDisableStatus {
+            deprecated,
+            disabled,
+            because: reason_source.and_then(|s| s.because.clone()),
+            date,
+            replacement_formula: replacement_source.and_then(|s| s.replacement_formula.clone()),
+            replacement_cask: replacement_source.and_then(|s| s.replacement_cask.clone()),
+        })
     }
 
     pub fn has_service(&self) -> bool {
@@ -309,6 +366,73 @@ pub struct DeprecateDisable {
     pub because: Option<String>,
     pub replacement_formula: Option<String>,
     pub replacement_cask: Option<String>,
+}
+
+/// `deprecate!` and `disable!` resolved against today's date.
+///
+/// Both flags can be true at once: `deprecate!` followed by a `disable!` whose
+/// date has passed leaves `Formula#deprecated?` true as well, which is what
+/// `DeprecateDisable.type` reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeprecateDisableStatus {
+    /// `Formula#deprecated?`
+    pub deprecated: bool,
+    /// `Formula#disabled?`: only a `disable!` date that has arrived.
+    pub disabled: bool,
+    pub because: Option<String>,
+    /// The date the formula is or will be disabled on.
+    pub date: Option<String>,
+    pub replacement_formula: Option<String>,
+    pub replacement_cask: Option<String>,
+}
+
+impl DeprecateDisableStatus {
+    /// `DeprecateDisable.type`, which reports a deprecation first.
+    pub fn kind(&self) -> &'static str {
+        if self.deprecated {
+            "deprecated"
+        } else {
+            "disabled"
+        }
+    }
+
+    /// The date sentence `DeprecateDisable.message` appends, if any. Past and
+    /// future are decided by the date, not by the kind.
+    pub fn date_sentence(&self) -> Option<String> {
+        let date = self.date.as_deref()?;
+        Some(if date < today().as_str() {
+            format!(" It was disabled on {date}.")
+        } else {
+            format!(" It will be disabled on {date}.")
+        })
+    }
+}
+
+/// Today as `YYYY-MM-DD`, which sorts like `Date`.
+fn today() -> String {
+    chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+/// Ruby's `Date >> 12`: the same day one year later, clamped to the last day
+/// of the month (only 29 February can need it).
+fn plus_twelve_months(date: &str) -> String {
+    let Some((year, rest)) = date.split_once('-') else {
+        return date.to_string();
+    };
+    let Ok(year) = year.parse::<i32>() else {
+        return date.to_string();
+    };
+    let next = year + 1;
+    let leap = next % 4 == 0 && (next % 100 != 0 || next % 400 == 0);
+    let rest = if rest == "02-29" && !leap {
+        "02-28"
+    } else {
+        rest
+    };
+    format!("{next:04}-{rest}")
 }
 
 fn parse_deprecate(v: &Value) -> Option<DeprecateDisable> {

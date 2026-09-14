@@ -446,7 +446,23 @@ Installed: `==> jq: stable 1.8.2 (bottled)`, then desc, homepage, `Installed`,
 `From: ...`, `License: ...`, `==> Dependencies`, `==> Options` when any,
 `==> Caveats`, `==> Analytics` (skip unless requested). Outdated formulae show
 `stable 1.8.1 → 1.8.2` in the title. `==> Installed Versions` header only with
-`--verbose`. Deprecated/disabled lines follow the homepage. The formula path
+`--verbose`. Deprecated/disabled lines follow the homepage.
+
+`deprecate!` and `disable!` are resolved against today's date, exactly as
+`formula.rb` does. `disable!` with a date that has not arrived only sets
+`deprecated?`; a date that has arrived sets `disabled?` as well, but
+`DeprecateDisable.type` reports `:deprecated` first, so a formula that also
+carries a `deprecate!` stanza keeps the word "deprecated" and, crucially,
+`FormulaInstaller#prelude_fetch` only refuses `:disabled` ones: a deprecated
+formula installs with a warning even after its disable date. The date
+sentence is `It was disabled on <date>.` when the date is in the past and
+`It will be disabled on <date>.` otherwise, regardless of the word, and the
+date is `disable!`'s when there is one, otherwise `deprecate!`'s plus twelve
+months (`REMOVE_DISABLED_TIME_WINDOW`). The reason comes from `deprecate!`
+whenever the formula is deprecated, the replacement from `disable!` whenever
+it is disabled. The title's `stable <version>` is the spec's version, never
+the `PkgVersion`: `libssh2` with revision 4 reads `stable 1.11.1`, while the
+installed side of an upgrade arrow is the keg's `PkgVersion` (`1.11.1_4`). The formula path
 in `From:` is `Formula/<first letter>/<name>.rb` (`Formula/lib/` for names
 starting with `lib`? No: Homebrew uses sharded dirs: names starting with
 `lib` go to `Formula/lib/`, otherwise `Formula/<first char>/`).

@@ -20,7 +20,7 @@ use crate::deps::{self, DepOptions};
 use crate::error::{Error, Result};
 use crate::keg::{self, Keg};
 use crate::model::FormulaEntry;
-use crate::model::formula::{BottleCellar, DeprecateDisable};
+use crate::model::formula::BottleCellar;
 use crate::platform::{BottleTag, Host};
 use crate::version::PkgVersion;
 
@@ -74,38 +74,28 @@ impl Item {
 /// `DeprecateDisable.message`, with the leading `<full_name> has been ` added by
 /// the caller.
 pub fn deprecate_disable_message(formula: &FormulaEntry) -> Option<String> {
-    let (kind, info) = if let Some(d) = formula.disablement() {
-        ("disabled", d)
-    } else {
-        ("deprecated", formula.deprecation()?)
-    };
-    let mut message = match info.because.as_deref() {
+    let status = formula.deprecate_disable()?;
+    let kind = status.kind();
+    let mut message = match status.because.as_deref() {
         Some(reason) if !reason.is_empty() => {
             format!("{kind} because it {}!", humanize_reason(reason))
         }
         _ => format!("{kind}!"),
     };
-    // Homebrew derives a disable date from the deprecation date when the
-    // formula has not named one; the internal API carries only one date per
-    // stanza, so it is used as is.
-    if let Some(date) = info.date.as_deref().filter(|d| !d.is_empty()) {
-        if kind == "disabled" {
-            message.push_str(&format!(" It was disabled on {date}."));
-        } else {
-            message.push_str(&format!(" It will be disabled on {date}."));
-        }
+    if let Some(sentence) = status.date_sentence() {
+        message.push_str(&sentence);
     }
-    if let Some(replacement) = replacement_with_type(&info) {
+    if let Some(replacement) = replacement_with_type(
+        status.replacement_formula.as_deref(),
+        status.replacement_cask.as_deref(),
+    ) {
         message.push_str(&format!("\nReplacement:\n  brew install {replacement}\n"));
     }
     Some(message)
 }
 
-fn replacement_with_type(info: &DeprecateDisable) -> Option<String> {
-    match (
-        info.replacement_formula.as_deref(),
-        info.replacement_cask.as_deref(),
-    ) {
+pub fn replacement_with_type(formula: Option<&str>, cask: Option<&str>) -> Option<String> {
+    match (formula, cask) {
         (Some(f), Some(c)) if f == c => Some(f.to_string()),
         (Some(f), _) => Some(format!("--formula {f}")),
         (None, Some(c)) => Some(format!("--cask {c}")),
@@ -136,12 +126,19 @@ fn humanize_reason(reason: &str) -> String {
 
 /// `FormulaInstaller#prelude_fetch`: refuse a disabled formula, warn about a
 /// deprecated one.
+///
+/// It switches on `DeprecateDisable.type`, which reports `:deprecated` first,
+/// so a formula that `deprecate!` already covered is only warned about even
+/// once its `disable!` date has passed.
 pub fn check_deprecate_disable(formula: &FormulaEntry, force: bool) -> Result<Option<String>> {
-    let Some(message) = deprecate_disable_message(formula) else {
+    let Some(status) = formula.deprecate_disable() else {
         return Ok(None);
     };
-    let message = format!("{} has been {message}", formula.full_name());
-    if formula.is_disabled() && !force {
+    let Some(body) = deprecate_disable_message(formula) else {
+        return Ok(None);
+    };
+    let message = format!("{} has been {body}", formula.full_name());
+    if !status.deprecated && !force {
         return Err(Error::user(message));
     }
     Ok(Some(message))

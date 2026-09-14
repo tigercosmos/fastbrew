@@ -153,8 +153,10 @@ fn github_url(cfg: &Config, formula: &FormulaEntry) -> String {
 /// exists; an outdated install rewrites the first spec as `<installed> → <spec>`.
 fn title_specs(formula: &FormulaEntry, installed_version: Option<&str>) -> String {
     let mut specs: Vec<String> = Vec::new();
-    if formula.stable_version.is_some() {
-        let mut s = format!("stable {}", formula.pkg_version());
+    // `"stable #{stable.version}"`: the spec's version, without the revision
+    // the `PkgVersion` of an installed keg carries.
+    if let Some(version) = formula.stable_version.as_deref() {
+        let mut s = format!("stable {version}");
         if formula.has_bottle() {
             s.push_str(" (bottled)");
         }
@@ -172,23 +174,24 @@ fn title_specs(formula: &FormulaEntry, installed_version: Option<&str>) -> Strin
 }
 
 fn deprecation_message(formula: &FormulaEntry) -> Option<String> {
-    let (kind, info) = if let Some(d) = formula.disablement() {
-        ("Disabled", d)
+    let status = formula.deprecate_disable()?;
+    // `info` capitalises `DeprecateDisable.message`'s first word.
+    let kind = if status.deprecated {
+        "Deprecated"
     } else {
-        ("Deprecated", formula.deprecation()?)
+        "Disabled"
     };
-    let mut msg = match info.because.as_deref() {
+    let mut msg = match status.because.as_deref() {
         Some(reason) => format!("{kind} because it {}!", humanize_reason(reason)),
         None => format!("{kind}!"),
     };
-    if let Some(date) = info.date.as_deref() {
-        if kind == "Disabled" {
-            msg.push_str(&format!(" It was disabled on {date}."));
-        } else {
-            msg.push_str(&format!(" It will be disabled on {date}."));
-        }
+    if let Some(sentence) = status.date_sentence() {
+        msg.push_str(&sentence);
     }
-    if let Some(replacement) = info.replacement_formula.or(info.replacement_cask) {
+    if let Some(replacement) = crate::ops::plan::replacement_with_type(
+        status.replacement_formula.as_deref(),
+        status.replacement_cask.as_deref(),
+    ) {
         msg.push_str(&format!("\nReplacement:\n  brew install {replacement}"));
     }
     Some(msg)
