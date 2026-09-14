@@ -1206,6 +1206,147 @@ fn sudo_service_user_needs_a_username_and_root() {
     );
 }
 
+/// The tap commands a user runs around a `file://` tap: tapping twice,
+/// `tap-info` in both shapes, the alias that resolves, and the untap that is
+/// refused while something from the tap is installed.
+#[test]
+fn tapping_reading_and_untapping_a_local_tap() {
+    let env = env_or_skip!();
+    let remote = tempfile::tempdir().expect("tempdir");
+    make_tap_remote(remote.path());
+    // An `Aliases/` entry is a symlink to the formula it renames.
+    std::fs::create_dir_all(remote.path().join("Aliases")).expect("mkdir Aliases");
+    std::os::unix::fs::symlink(
+        "../Formula/scenario.rb",
+        remote.path().join("Aliases/scenario-alias"),
+    )
+    .expect("symlink");
+    assert!(git(remote.path(), &["add", "-A"]));
+    assert!(git(
+        remote.path(),
+        &["commit", "--quiet", "-m", "Add the alias"]
+    ));
+    let url = format!("file://{}", remote.path().display());
+
+    let out = env.run(&["tap", "tiger/local", &url]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = support::strip_ansi(&String::from_utf8_lossy(&out.stderr));
+    assert!(stderr.contains("==> Tapping tiger/local"), "{stderr}");
+    assert!(stderr.contains("Tapped 1 formula ("), "{stderr}");
+
+    // `cmd/tap.rb` rescues `TapAlreadyTappedError`: tapping again is a no-op.
+    let again = env.run(&["tap", "tiger/local", &url]);
+    assert!(again.status.success());
+    assert_eq!(String::from_utf8_lossy(&again.stdout), "");
+
+    // A bare `tap` lists what is installed.
+    assert!(
+        env.stdout(&["tap"]).lines().any(|l| l == "tiger/local"),
+        "{}",
+        env.stdout(&["tap"])
+    );
+
+    // --- tap-info ---------------------------------------------------------
+    let info = env.stdout(&["tap-info", "tiger/local"]);
+    assert!(info.starts_with("tiger/local: Installed\n"), "{info}");
+    assert!(info.contains("\n1 formula\n"), "{info}");
+    assert!(info.contains(&format!("\nFrom: {url}\n")), "{info}");
+    assert!(info.contains("\n==> Formulae\nscenario\n"), "{info}");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&env.stdout(&["tap-info", "--installed", "--json"])).expect("json");
+    let row = json
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|t| t["name"] == serde_json::json!("tiger/local"))
+        .expect("the tap is listed");
+    assert_eq!(row["user"], serde_json::json!("tiger"));
+    assert_eq!(row["repo"], serde_json::json!("local"));
+    assert_eq!(row["installed"], serde_json::json!(true));
+    assert_eq!(row["official"], serde_json::json!(false));
+    assert_eq!(row["remote"], serde_json::json!(url));
+    assert_eq!(row["custom_remote"], serde_json::json!(true));
+    assert_eq!(
+        row["formula_names"],
+        serde_json::json!(["tiger/local/scenario"])
+    );
+
+    // A tap that is not installed is reported and fails the command.
+    let out = env.run(&["tap-info", "nobody/nothing"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("nobody/nothing: Not installed"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // --- the tap's formula is resolvable, by name and by alias ------------
+    let formula = env.stdout(&["info", "tiger/local/scenario"]);
+    assert!(
+        formula.starts_with("==> tiger/local/scenario: stable 1.0\n"),
+        "{formula}"
+    );
+    assert!(formula.contains("\nTap: tiger/local\n"), "{formula}");
+    let aliased = env.stdout(&["info", "tiger/local/scenario-alias"]);
+    assert!(
+        aliased.starts_with("==> tiger/local/scenario: stable 1.0\n"),
+        "the alias resolves to the formula it points at:\n{aliased}"
+    );
+    let search = env.stdout(&["search", "scenario"]);
+    assert!(
+        search.lines().any(|l| l == "tiger/local/scenario"),
+        "search lists the tap-qualified name:\n{search}"
+    );
+
+    // --- a tap formula with no bottle is the Ruby brew's job --------------
+    let out = env.run(&["install", "--dry-run", "tiger/local/scenario"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = support::strip_ansi(&String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stderr.contains("refusing to delegate to brew (scenario: no bottle available!)"),
+        "the delegation names the reason:\n{stderr}"
+    );
+
+    // --- untap ------------------------------------------------------------
+    let keg = env.sandbox.prefix.join("Cellar/scenario/1.0");
+    std::fs::create_dir_all(&keg).expect("mkdir keg");
+    std::fs::write(
+        keg.join("INSTALL_RECEIPT.json"),
+        serde_json::json!({"source": {"tap": "tiger/local"}}).to_string(),
+    )
+    .expect("write receipt");
+
+    let out = env.run(&["untap", "tiger/local"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)),
+        "Error: Refusing to untap tiger/local because it contains the following installed formulae:\n\
+         tiger/local/scenario\n"
+    );
+    assert!(env.stdout(&["tap"]).contains("tiger/local"));
+
+    // `--force` untaps anyway.
+    let out = env.run(&["untap", "--force", "tiger/local"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!env.stdout(&["tap"]).contains("tiger/local"));
+    let out = env.run(&["info", "tiger/local/scenario"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("This command requires the tap tiger/local."),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 // ------------------------------------------------------- ruby post_install
 
 /// Write a tap formula plus an installed keg for it, so the commands that act
@@ -1628,4 +1769,263 @@ fn pinning_a_cask_records_a_relative_symlink() {
     let out = env.run(&["pin", "--cask", "fastbrew-never-installed"]);
     assert_eq!(out.status.code(), Some(1));
     let _ = env.run(&["uninstall", "--cask", token]);
+}
+
+/// `help`, `--help`, `commands` and the wording of a bad flag.
+#[test]
+fn help_and_usage_errors() {
+    let env = env_or_skip!();
+
+    // `help <command>` is the command's usage banner; an alias says so.
+    let install = env.stdout(&["help", "install"]);
+    assert!(install.starts_with("Usage: fastbrew install "), "{install}");
+    assert!(install.contains("--only-dependencies"), "{install}");
+    let alias = env.stdout(&["help", "ls"]);
+    assert!(alias.starts_with("Usage: fastbrew list "), "{alias}");
+    assert!(alias.contains("`ls` is an alias for `list`."), "{alias}");
+
+    // `--help` on a subcommand is clap's own, on stdout, exiting 0.
+    let out = env.run(&["install", "--help"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Usage: fastbrew install"), "{text}");
+    assert!(text.contains("--cask"), "{text}");
+
+    // An unknown flag is a usage error on stderr, exiting 1.
+    let out = env.run(&["list", "--definitely-not-a-flag"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    assert!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr))
+            .contains("Error: unexpected argument '--definitely-not-a-flag' found"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // `commands` groups the built-ins; `--quiet` drops the headers.
+    let commands = env.stdout(&["commands"]);
+    assert!(
+        commands.starts_with("==> Built-in commands\n"),
+        "{commands}"
+    );
+    for expected in ["install", "services", "tap-info", "doctor", "completions"] {
+        assert!(
+            commands.lines().any(|l| l == expected),
+            "`{expected}` missing from:\n{commands}"
+        );
+    }
+    let quiet = env.stdout(&["commands", "--quiet"]);
+    assert!(!quiet.contains("==>"), "{quiet}");
+}
+
+/// Every path command and `config` answer with the sandbox, never the host
+/// prefix, and `--version`/`-v` agree.
+#[test]
+fn the_path_commands_answer_with_the_sandbox() {
+    let env = env_or_skip!();
+    let prefix = env.sandbox.prefix.display().to_string();
+
+    assert_eq!(env.stdout(&["--prefix"]).trim(), prefix);
+    assert_eq!(
+        env.stdout(&["--cellar"]).trim(),
+        env.sandbox.prefix.join("Cellar").display().to_string()
+    );
+    assert_eq!(
+        env.stdout(&["--caskroom"]).trim(),
+        env.sandbox.prefix.join("Caskroom").display().to_string()
+    );
+    assert_eq!(
+        env.stdout(&["--cache"]).trim(),
+        env.sandbox.cache.display().to_string()
+    );
+    assert_eq!(env.stdout(&["--repository"]).trim(), prefix);
+    assert_eq!(
+        env.stdout(&["--taps"]).trim(),
+        env.sandbox
+            .prefix
+            .join("Library/Taps")
+            .display()
+            .to_string()
+    );
+
+    // `--version` and its `-v` alias print the compatibility version first.
+    let version = env.stdout(&["--version"]);
+    assert!(
+        version.starts_with(&format!("Homebrew {}\n", fastbrew::HOMEBREW_COMPAT_VERSION)),
+        "{version}"
+    );
+    assert!(
+        version.contains(&format!("fastbrew {}", fastbrew::FASTBREW_VERSION)),
+        "{version}"
+    );
+    assert_eq!(env.stdout(&["-v"]), version);
+
+    // `config` reports the sandbox, the bottle tag and the variables that are
+    // set, never `/opt/homebrew`.
+    let config = env.stdout(&["config"]);
+    assert!(
+        config.contains(&format!("HOMEBREW_PREFIX: {prefix}\n")),
+        "{config}"
+    );
+    assert!(
+        config.contains(&format!(
+            "HOMEBREW_CACHE: {}\n",
+            env.sandbox.cache.display()
+        )),
+        "{config}"
+    );
+    assert!(
+        config.contains("HOMEBREW_NO_AUTO_UPDATE: set\n"),
+        "{config}"
+    );
+    assert!(
+        config.contains(&format!("Bottle tag: {}", support::bottle_tag())),
+        "{config}"
+    );
+    assert!(!config.contains("/opt/homebrew"), "{config}");
+}
+
+/// `shellenv` speaks each shell's own syntax, from `$SHELL` or the argument.
+#[test]
+fn shellenv_follows_the_shell() {
+    let env = env_or_skip!();
+    let prefix = env.sandbox.prefix.display().to_string();
+    let shellenv = |shell: &str, arg: Option<&str>| -> String {
+        let mut cmd = env.cmd();
+        cmd.env("SHELL", format!("/bin/{shell}")).arg("shellenv");
+        if let Some(arg) = arg {
+            cmd.arg(arg);
+        }
+        let out = cmd.output().expect("run fastbrew");
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let zsh = shellenv("zsh", None);
+    assert!(
+        zsh.starts_with(&format!("export HOMEBREW_PREFIX=\"{prefix}\";\n")),
+        "{zsh}"
+    );
+    assert!(
+        zsh.contains(&format!(
+            "fpath[1,0]=\"{prefix}/share/zsh/site-functions\";"
+        )),
+        "the zsh form adds the completions directory:\n{zsh}"
+    );
+
+    let bash = shellenv("bash", None);
+    assert!(bash.starts_with("export HOMEBREW_PREFIX="), "{bash}");
+    assert!(!bash.contains("fpath"), "{bash}");
+    assert!(
+        bash.contains(&format!("export PATH=\"{prefix}/bin:")),
+        "{bash}"
+    );
+
+    // The argument wins over `$SHELL`.
+    let fish = shellenv("bash", Some("fish"));
+    assert!(
+        fish.starts_with(&format!(
+            "set --global --export HOMEBREW_PREFIX \"{prefix}\";\n"
+        )),
+        "{fish}"
+    );
+    assert!(
+        fish.contains("fish_add_path --global --move --path"),
+        "{fish}"
+    );
+}
+
+/// `-q` and `-v` are global flags Homebrew accepts anywhere, so no command
+/// may reject them.
+#[test]
+fn quiet_and_verbose_are_accepted_everywhere() {
+    let env = env_or_skip!();
+    for args in [
+        vec!["list"],
+        vec!["search", "jq"],
+        vec!["info", "jq"],
+        vec!["deps", "jq"],
+        vec!["outdated"],
+        vec!["leaves"],
+        vec!["commands"],
+        vec!["config"],
+        vec!["doctor"],
+        vec!["tap"],
+        vec!["services", "list"],
+        vec!["completions", "state"],
+    ] {
+        for flag in ["-q", "--quiet", "-v", "--verbose"] {
+            let mut with_flag = args.clone();
+            with_flag.push(flag);
+            let out = env.run(&with_flag);
+            assert!(
+                out.status.success(),
+                "`fastbrew {}` failed: {}",
+                with_flag.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+/// `--cask` applies to every named argument (`cmd/install.rb` conflicts the
+/// two switches), and a name that is both resolves to the formula with
+/// Homebrew's warning.
+#[test]
+fn mixed_formula_and_cask_arguments() {
+    let env = env_or_skip!();
+
+    // `install <formula> --cask <cask>` treats *both* as casks, so the
+    // formula name fails as an unknown cask.
+    let out = env.run(&["install", "jq", "--cask", "rectangle"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)).trim(),
+        "Error: Cask 'jq' is unavailable: No Cask with this name exists."
+    );
+    assert!(!env.caskroom("rectangle").exists(), "nothing was installed");
+
+    // `--formula` and `--cask` cannot both be given.
+    let out = env.run(&["install", "--formula", "--cask", "jq"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot be used with"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A tap cask that shadows a core formula name: the formula wins, with
+    // `NamedArgs#package_conflicts_message`.
+    env.write_cask(
+        "jq",
+        &app_cask_rb(
+            "jq",
+            "9.9",
+            "https://example.invalid/jq.zip",
+            ":no_check",
+            "Jq.app",
+            "",
+        ),
+    );
+    let out = env.run(&["info", "jq"]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).starts_with("==> jq: stable "),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)).trim(),
+        "Warning: Treating jq as a formula. For the cask, use fixture/casks/jq or specify the \
+         `--cask` flag. To silence this message, use the `--formula` flag."
+    );
+
+    // `-q` silences it, `--cask` picks the cask.
+    let out = env.run(&["info", "-q", "jq"]);
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    let cask = env.stdout(&["info", "--cask", "jq"]);
+    assert!(
+        cask.starts_with("==> fixture/casks/jq (jq fixture): 9.9"),
+        "{cask}"
+    );
 }
