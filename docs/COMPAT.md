@@ -180,6 +180,12 @@ Cache naming (shared with Homebrew):
   of them writes nothing and takes no lock. The install path releases its locks
   before its final `brew cleanup <formula>` step, which takes them again.
 
+  `cleanup` also removes the extraction staging directories
+  `$CELLAR/<name>/.fastbrew-<uuid>` that a killed install leaves behind, and
+  the rack with them when nothing else is in it. Homebrew unpacks elsewhere
+  and has no equivalent. The sweep holds the rack's formula lock, so a
+  running install keeps its own staging directory.
+
 `INSTALL_RECEIPT.json` written after pouring a bottle (pretty JSON, 2-space
 indent, key order as below; keys `built_prefix`, `padded_prefix`,
 `linkage_files`, `binary_relocation_files`, `relocated_build_prefix`,
