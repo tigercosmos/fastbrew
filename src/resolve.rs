@@ -1,17 +1,15 @@
 //! Name resolution for formulae and casks.
 //!
 //! Order for a formula reference `ref` (port of `Formulary.loader_for` for the
-//! API and tap cases):
-//! 1. `user/repo/name`: third-party tap formula (via `tap` + `rubylite`);
-//!   `homebrew/core/name` and `Homebrew/homebrew-core/name` mean core.
-//! 2. Exact core name.
-//! 3. Core alias (`formula_aliases`), then rename (`formula_renames`, warn
-//!   like Homebrew does not; just resolve), then tap migration (resolve to
-//!   the tap's formula if the tap is installed, else error naming the tap).
-//! 4. Installed keg by name (for formulae removed from the API): build a
-//!   `FormulaEntry` from the receipt with only the fields the receipt knows.
-//! Casks: token, then `cask_renames`, then tap migration, then installed
-//! Caskroom entry.
+//! API and tap cases). First, `user/repo/name` selects a third-party tap
+//! formula (via `tap` + `rubylite`); `homebrew/core/name` and
+//! `Homebrew/homebrew-core/name` mean core. Second, an exact core name.
+//! Third, a core alias (`formula_aliases`), then a rename (`formula_renames`),
+//! then a tap migration (resolve to the tap's formula if the tap is installed,
+//! else error naming the tap). Fourth, an installed keg by name (for formulae
+//! removed from the API): build a `FormulaEntry` from the receipt with only
+//! the fields the receipt knows. Casks: token, then `cask_renames`, then tap
+//! migration, then installed Caskroom entry.
 //!
 //! Errors are `Error::Unavailable` with up to three suggestions (Levenshtein
 //! distance ≤ 2 or prefix matches, from the index).
