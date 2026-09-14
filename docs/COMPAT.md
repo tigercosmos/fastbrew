@@ -220,6 +220,10 @@ append text, Homebrew parses it as a `Version`. `time` is install time in
 seconds. `source.path` is the API file path. `installed_on_request` is false
 for dependencies.
 
+The receipt is written with `Pathname#atomic_write`, which keeps an existing
+file's mode and gives a new one `0666 & ~umask` (0644 normally), not the 0600
+a temporary file would default to.
+
 `N files, SIZE` (`Pathname#abv`, printed by `info`, the install summary line
 and `Uninstalling ...`) comes from `DiskUsageExtension#compute_disk_usage`:
 every non-directory entry counts as a file except `.DS_Store`, the byte total
@@ -413,7 +417,17 @@ starting with `lib`? No: Homebrew uses sharded dirs: names starting with
 `list`: names in columns like `ls -C` on a TTY, one per line otherwise.
 `list --versions`: `name version [version ...]`. `outdated`: names; with
 `--verbose`: `name (installed) < current [pinned at x]`. Install progress:
-`==> Fetching hello`, `==> Downloading https://ghcr.io/v2/homebrew/core/hello/manifests/2.12.3-1`, `Already downloaded: <path>` or a progress bar, `==> Pouring hello--2.12.3.arm64_tahoe.bottle.1.tar.gz`, `==> Caveats` block, `🍺  /opt/homebrew/Cellar/hello/2.12.3: 8 files, 186KB`. Dependencies print `==> Installing dependencies for jq: oniguruma` then `==> Installing jq dependency: oniguruma`, and after everything `==> Installing jq`. Uninstall prints `Uninstalling /opt/homebrew/Cellar/hello/2.12.3... (8 files, 186KB)`. Dependents block: `Error: Refusing to uninstall /opt/homebrew/Cellar/oniguruma/6.9.10\nbecause it is required by jq, which is currently installed.\nYou can override this and force removal with:\n  brew uninstall --ignore-dependencies oniguruma`.
+`==> Fetching hello`, `==> Downloading https://ghcr.io/v2/homebrew/core/hello/manifests/2.12.3-1`, `Already downloaded: <path>` or a progress bar, `==> Pouring hello--2.12.3.arm64_tahoe.bottle.1.tar.gz`, `🍺  /opt/homebrew/Cellar/hello/2.12.3: 8 files, 186KB`. `Pouring` names the bottle, not the hashed cache file it was read from. Dependencies print `==> Installing dependencies for jq: oniguruma` then `==> Installing jq dependency: oniguruma`, and after everything `==> Installing jq`; with several formulae named, each gets its own heading listing only its own dependencies. Uninstall prints `Uninstalling /opt/homebrew/Cellar/hello/2.12.3... (8 files, 186KB)`, and `--force` prints the rack's *name*: `Uninstalling hello... (8 files, 186KB)`. Dependents block: `Error: Refusing to uninstall /opt/homebrew/Cellar/oniguruma/6.9.10\nbecause it is required by jq, which is currently installed.\nYou can override this and force removal with:\n  brew uninstall --ignore-dependencies oniguruma`.
+
+Caveats come last, after the summary line and after `==> Running `brew cleanup
+<name>`...`: `Homebrew::Install.finish_installation` cleans up and then calls
+`Messages#display_messages(force_caveats: true)`, which prints one `==> Caveats`
+heading, the shared completion and Emacs Lisp notices, and then each package's
+own caveats under an `==> <name>` heading — even when only one package was
+installed. `install/check.rb` decides the already-installed messages, and
+whether each is `opoo` (`Warning:`) or `onoe` (`Error:`); `ofail`ed blocks
+(a named pinned formula in `upgrade`, a failed `brew link` step) print their
+text and make the command exit 1 without any extra line.
 
 ## 10. Environment variables honored
 
