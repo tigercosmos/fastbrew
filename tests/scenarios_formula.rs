@@ -1783,6 +1783,8 @@ end
 /// a real archive through the real install pipeline without a network. Every
 /// fixture uses an `all` bottle, so nothing depends on the host's bottle tag.
 struct Fixture {
+    /// `user/repo` of the tap that carries the formula.
+    tap: String,
     name: String,
     version: String,
     /// Regular files relative to the keg root.
@@ -1796,14 +1798,12 @@ struct Fixture {
     linkage_files: Vec<String>,
 }
 
-/// Where the fixture bottles pretend to be served from.
-const FIXTURE_ROOT_URL: &str = "https://bottles.invalid/v2/review/fixtures";
-
 // Each test uses the parts of the builder its own bottle needs.
 #[allow(dead_code)]
 impl Fixture {
     fn new(name: &str, version: &str) -> Fixture {
         Fixture {
+            tap: "review/fixtures".to_string(),
             name: name.to_string(),
             version: version.to_string(),
             files: vec![(format!("bin/{name}"), b"#!/bin/sh\necho fixture\n".to_vec())],
@@ -1811,6 +1811,17 @@ impl Fixture {
             cellar: "any_skip_relocation",
             linkage_files: Vec::new(),
         }
+    }
+
+    fn in_tap(mut self, tap: &str) -> Fixture {
+        self.tap = tap.to_string();
+        self
+    }
+
+    /// Where this tap's bottles pretend to be served from. Nothing is ever
+    /// fetched: the cache is seeded under exactly this URL's cache path.
+    fn root_url(&self) -> String {
+        format!("https://bottles.invalid/v2/{}", self.tap)
     }
 
     fn file(mut self, path: &str, body: &[u8]) -> Fixture {
@@ -1837,9 +1848,13 @@ impl Fixture {
 
     /// Write the tap formula and seed the bottle; returns the full name.
     fn publish(&self, sb: &Sandbox) -> String {
+        let (user, repo) = self.tap.split_once('/').expect("user/repo");
         let formulae = sb
             .prefix
-            .join("Library/Taps/review/homebrew-fixtures/Formula");
+            .join("Library/Taps")
+            .join(user)
+            .join(format!("homebrew-{repo}"))
+            .join("Formula");
         std::fs::create_dir_all(&formulae).expect("mkdir the fixture tap");
         let tarball = self.build(sb);
         let sha = fastbrew::cask::download::file_sha256(&tarball).expect("sha256 of the bottle");
@@ -1861,7 +1876,7 @@ impl Fixture {
   sha256 "{zeros}"
 
   bottle do
-    root_url "{FIXTURE_ROOT_URL}"
+    root_url "{root_url}"
     sha256 cellar: :{cellar}, all: "{sha}"
   end
 end
@@ -1869,12 +1884,13 @@ end
                 name = self.name,
                 version = self.version,
                 cellar = self.cellar,
+                root_url = self.root_url(),
                 zeros = "0".repeat(64),
             ),
         )
         .expect("write the fixture formula");
 
-        let blob_url = format!("{FIXTURE_ROOT_URL}/{}/blobs/sha256:{sha}", self.name);
+        let blob_url = format!("{}/{}/blobs/sha256:{sha}", self.root_url(), self.name);
         std::fs::copy(
             &tarball,
             cached_download(
@@ -1900,8 +1916,10 @@ end
             }],
         });
         let manifest_url = format!(
-            "{FIXTURE_ROOT_URL}/{}/manifests/{}",
-            self.name, self.version
+            "{}/{}/manifests/{}",
+            self.root_url(),
+            self.name,
+            self.version
         );
         std::fs::write(
             cached_download(
@@ -1913,7 +1931,7 @@ end
         )
         .expect("seed the manifest into the cache");
 
-        format!("review/fixtures/{}", self.name)
+        format!("{}/{}", self.tap, self.name)
     }
 
     /// `<name>/<version>/...` as a gzipped tar.
@@ -2101,4 +2119,87 @@ fn a_reinstall_whose_link_fails_keeps_the_new_keg() {
         "not ours\n",
         "the foreign file is untouched"
     );
+}
+
+/// Two taps can carry the same formula name, and both want the same rack.
+/// `Formulary.to_rack` reduces `user/repo/jq` to the basename, so a
+/// tap-qualified command would act on whatever that rack holds; removing
+/// another tap's package that way cannot be undone.
+#[test]
+fn a_tap_qualified_command_refuses_another_taps_keg() {
+    let sb = sandbox_or_skip!();
+
+    let one = Fixture::new("fbidentity", "1.0")
+        .in_tap("review/one")
+        .publish(&sb);
+    Fixture::new("fbidentity", "1.0")
+        .in_tap("review/two")
+        .file("bin/fbidentity-two", b"#!/bin/sh\necho two\n")
+        .publish(&sb);
+    ok(&sb, &["install", &one]);
+
+    let text = fails(&sb, &["uninstall", "review/two/fbidentity"]);
+    assert!(
+        text.contains("fbidentity was installed from the review/one tap"),
+        "{text}"
+    );
+    assert!(
+        text.contains("but you are trying to uninstall it from the review/two tap."),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "Formulae with the same name from different taps cannot be installed at the same time."
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("  brew uninstall review/one/fbidentity"),
+        "{text}"
+    );
+
+    // Every command that unlinks, removes or rewrites the rack refuses the
+    // same way, and each names itself.
+    for (args, verb) in [
+        (["install", "review/two/fbidentity"], "install"),
+        (["reinstall", "review/two/fbidentity"], "reinstall"),
+        (["upgrade", "review/two/fbidentity"], "upgrade"),
+        (["link", "review/two/fbidentity"], "link"),
+        (["unlink", "review/two/fbidentity"], "unlink"),
+        (["pin", "review/two/fbidentity"], "pin"),
+        (["unpin", "review/two/fbidentity"], "unpin"),
+        (["postinstall", "review/two/fbidentity"], "postinstall"),
+    ] {
+        let text = fails(&sb, &args);
+        assert!(
+            text.contains(&format!(
+                "but you are trying to {verb} it from the review/two tap."
+            )),
+            "{args:?}:\n{text}"
+        );
+    }
+
+    // Tap one's keg is untouched, still linked, and still the only version.
+    let keg = keg(&sb, "fbidentity", "1.0");
+    assert!(keg.join("INSTALL_RECEIPT.json").is_file());
+    assert!(!keg.join("bin/fbidentity-two").exists(), "tap two's file");
+    assert!(sb.prefix.join("bin/fbidentity").is_symlink());
+    assert!(sb.prefix.join("opt/fbidentity").is_symlink());
+
+    // The tap it came from still works.
+    ok(&sb, &["uninstall", &one]);
+    assert!(!keg.exists());
+}
+
+/// A bare name keeps Homebrew's behavior of acting on whatever the rack holds.
+#[test]
+fn a_bare_name_still_acts_on_the_rack() {
+    let sb = sandbox_or_skip!();
+
+    let full = Fixture::new("fbbarename", "1.0")
+        .in_tap("review/one")
+        .publish(&sb);
+    ok(&sb, &["install", &full]);
+    ok(&sb, &["uninstall", "fbbarename"]);
+    assert!(!keg(&sb, "fbbarename", "1.0").exists());
 }
