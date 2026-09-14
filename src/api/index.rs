@@ -624,8 +624,12 @@ impl Index {
             .collect()
     }
 
-    /// `(name, desc)` pairs whose name or description matches (case-insensitive substring or regex).
-    pub fn search_formula_descriptions(&self, query: &SearchQuery) -> Vec<(String, String)> {
+    /// `(name, desc)` pairs matching the query in `scope` (`Descriptions.search`).
+    pub fn search_formula_descriptions(
+        &self,
+        query: &SearchQuery,
+        scope: DescScope,
+    ) -> Vec<(String, String)> {
         (0..self.n_formulae)
             .filter_map(|i| {
                 let desc = self.formula_desc_at(i);
@@ -635,13 +639,17 @@ impl Index {
                 let name = self.formula_name_at(i);
                 let lower = self.blob_str("f_desc_lc", "f_desc_lc_idx", i);
                 query
-                    .matches(name, desc, lower)
+                    .matches(name, desc, lower, scope)
                     .then(|| (name.to_string(), desc.to_string()))
             })
             .collect()
     }
 
-    pub fn search_cask_descriptions(&self, query: &SearchQuery) -> Vec<(String, String)> {
+    pub fn search_cask_descriptions(
+        &self,
+        query: &SearchQuery,
+        scope: DescScope,
+    ) -> Vec<(String, String)> {
         (0..self.n_casks)
             .filter_map(|i| {
                 let desc = self.cask_desc_at(i);
@@ -651,7 +659,7 @@ impl Index {
                 let token = self.cask_token_at(i);
                 let lower = self.blob_str("c_desc_lc", "c_desc_lc_idx", i);
                 query
-                    .matches(token, desc, lower)
+                    .matches(token, desc, lower, scope)
                     .then(|| (token.to_string(), desc.to_string()))
             })
             .collect()
@@ -716,17 +724,32 @@ impl SearchQuery {
         }
     }
 
-    /// `Descriptions.search`: a regex matches name or description; plain text
-    /// matches case-insensitively against either.
-    fn matches(&self, name: &str, desc: &str, desc_lower: &str) -> bool {
-        match self {
-            SearchQuery::Regex(re) => re.is_match(name) || re.is_match(desc),
-            SearchQuery::Text(t) => {
-                let t = t.to_lowercase();
-                desc_lower.contains(&t) || name.to_lowercase().contains(&t)
-            }
+    /// `Descriptions.search(query, search_type)`: `brew search --desc` and
+    /// `brew desc -d` look at descriptions only, `brew desc -n` at names only,
+    /// and `brew desc -s` at both.
+    fn matches(&self, name: &str, desc: &str, desc_lower: &str, scope: DescScope) -> bool {
+        let hit = |haystack: &str, lowered: Option<&str>| match self {
+            SearchQuery::Regex(re) => re.is_match(haystack),
+            SearchQuery::Text(t) => match lowered {
+                Some(l) => l.contains(&t.to_lowercase()),
+                None => haystack.to_lowercase().contains(&t.to_lowercase()),
+            },
+        };
+        match scope {
+            DescScope::Name => hit(name, None),
+            DescScope::Desc => hit(desc, Some(desc_lower)),
+            DescScope::Either => hit(name, None) || hit(desc, Some(desc_lower)),
         }
     }
+}
+
+/// Which field a description search looks at (`Descriptions.search`'s
+/// `search_type`: `:name`, `:desc` or `:either`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DescScope {
+    Name,
+    Desc,
+    Either,
 }
 
 /// `Search.simplify_string`: lowercase and strip everything but `[a-z0-9@+]`.
@@ -1242,11 +1265,24 @@ mod tests {
         assert_eq!(index.search_formula_names("aq"), vec!["jaq"]);
         assert_eq!(index.search_cask_tokens("fox"), vec!["firefox"]);
         let q = SearchQuery::parse("json").unwrap();
-        let hits = index.search_formula_descriptions(&q);
+        let hits = index.search_formula_descriptions(&q, DescScope::Desc);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "jq");
         let re = SearchQuery::parse("/^Web/").unwrap();
-        assert_eq!(index.search_cask_descriptions(&re).len(), 1);
+        assert_eq!(
+            index.search_cask_descriptions(&re, DescScope::Desc).len(),
+            1
+        );
+        // A name-only search never looks at the description.
+        let q = SearchQuery::parse("hello").unwrap();
+        assert_eq!(
+            index.search_formula_descriptions(&q, DescScope::Name).len(),
+            1
+        );
+        assert_eq!(
+            index.search_formula_descriptions(&q, DescScope::Desc).len(),
+            0
+        );
         assert_eq!(index.formulae_providing_executable("jq"), vec!["jq"]);
         assert!(index.formulae_providing_executable("nope").is_empty());
     }

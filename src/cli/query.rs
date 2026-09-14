@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use crate::api::index::{Index, SearchQuery};
+use crate::api::index::{DescScope, Index, SearchQuery};
 use crate::config::Config;
 use crate::deps::{self, DepOptions};
 use crate::error::{Error, Result};
@@ -578,16 +578,25 @@ pub fn search(ctx: &Ctx, args: &SearchArgs) -> Result<()> {
 
     if args.desc {
         let parsed = SearchQuery::parse(&query)?;
+        // `brew search --desc` searches descriptions only.
         if want_formulae {
             output::ohai("Formulae");
-            print_descriptions(ctx, index.search_formula_descriptions(&parsed), false);
+            print_descriptions(
+                ctx,
+                index.search_formula_descriptions(&parsed, DescScope::Desc),
+                false,
+            );
         }
         if want_formulae && want_casks {
             println!();
         }
         if want_casks {
             output::ohai("Casks");
-            print_descriptions(ctx, index.search_cask_descriptions(&parsed), true);
+            print_descriptions(
+                ctx,
+                index.search_cask_descriptions(&parsed, DescScope::Desc),
+                true,
+            );
         }
         return Ok(());
     }
@@ -753,27 +762,17 @@ fn filter_desc(
     args: &DescArgs,
     cask: bool,
 ) -> Vec<(String, String)> {
-    let all = if cask {
-        index.search_cask_descriptions(query)
+    let scope = if args.search || (args.name && args.description) {
+        DescScope::Either
+    } else if args.name {
+        DescScope::Name
     } else {
-        index.search_formula_descriptions(query)
+        DescScope::Desc
     };
-    if args.search {
-        return all;
-    }
-    all.into_iter()
-        .filter(|(name, desc)| {
-            let name_hit = matches_text(query, name);
-            let desc_hit = matches_text(query, desc);
-            (args.name && name_hit) || (args.description && desc_hit)
-        })
-        .collect()
-}
-
-fn matches_text(query: &SearchQuery, haystack: &str) -> bool {
-    match query {
-        SearchQuery::Regex(re) => re.is_match(haystack),
-        SearchQuery::Text(t) => haystack.to_lowercase().contains(&t.to_lowercase()),
+    if cask {
+        index.search_cask_descriptions(query, scope)
+    } else {
+        index.search_formula_descriptions(query, scope)
     }
 }
 

@@ -113,7 +113,9 @@ pub struct InfoArgs {
     #[arg(value_name = "formula|cask")]
     pub names: Vec<String>,
     /// Print a JSON representation (`--json=v1` or `--json=v2`).
-    #[arg(long, num_args = 0..=1, default_missing_value = "v1", value_name = "version")]
+    // `require_equals` keeps `info --json jq` from swallowing `jq` as the value.
+    #[arg(long, num_args = 0..=1, require_equals = true,
+          default_missing_value = "v1", value_name = "version")]
     pub json: Option<String>,
     /// Print information about all installed formulae and casks.
     #[arg(long)]
@@ -303,7 +305,8 @@ pub struct OutdatedArgs {
     #[arg(long, visible_alias = "casks")]
     pub cask: bool,
     /// Print a JSON representation.
-    #[arg(long, num_args = 0..=1, default_missing_value = "v2", value_name = "version")]
+    #[arg(long, num_args = 0..=1, require_equals = true,
+          default_missing_value = "v2", value_name = "version")]
     pub json: Option<String>,
     /// Also include casks with `auto_updates true` or `version :latest`.
     #[arg(short = 'g', long)]
