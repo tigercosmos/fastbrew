@@ -192,18 +192,46 @@ pub fn outdated_casks(
         _ => crate::deps::installed_cask_tokens(cfg),
     };
     let mut out = Vec::new();
-    for token in candidates {
+    for requested in candidates {
+        // A tap-qualified request (`user/repo/token`) names the Caskroom entry
+        // by its bare token.
+        let token = requested
+            .rsplit('/')
+            .next()
+            .unwrap_or(&requested)
+            .to_string();
         let Some(installed_version) = installed_cask_version(cfg, &token) else {
             continue;
         };
-        let Some(i) = index.cask_index(&token) else {
-            continue;
+        // Core casks come straight from the index; a cask installed from a
+        // tap is resolved through the tap recorded in its receipt, like
+        // `Caskroom.casks` loading each installed cask.
+        let (current, is_latest, auto_updates) = match index.cask_index(&token) {
+            Some(i) if !requested.contains('/') => (
+                index.cask_version_at(i).to_string(),
+                index.cask_is_latest_at(i),
+                index.cask_auto_updates_at(i),
+            ),
+            _ => {
+                let reference = if requested.contains('/') {
+                    requested.clone()
+                } else {
+                    crate::deps::installed_cask_reference(cfg, &token)
+                };
+                match crate::resolve::resolve_cask(cfg, index, &reference) {
+                    Ok(entry) => (
+                        entry.version.clone().unwrap_or_default(),
+                        entry.is_latest(),
+                        entry.auto_updates,
+                    ),
+                    Err(_) => continue,
+                }
+            }
         };
-        let current = index.cask_version_at(i).to_string();
         if current.is_empty() {
             continue;
         }
-        if index.cask_is_latest_at(i) {
+        if is_latest {
             // `version :latest` casks only count with `--greedy`; Homebrew then
             // compares the download sha, which fastbrew cannot do offline.
             if !greedy {
@@ -213,7 +241,7 @@ pub fn outdated_casks(
             // An `auto_updates` cask updates itself, so it is only reported
             // with `--greedy`.
             let same = installed_version == current;
-            if same || (index.cask_auto_updates_at(i) && !greedy) {
+            if same || (auto_updates && !greedy) {
                 continue;
             }
         }

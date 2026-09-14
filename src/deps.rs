@@ -462,6 +462,15 @@ pub fn installed_cask_dependencies(cfg: &Config, index: &Index) -> Vec<(String, 
         .collect()
 }
 
+/// The reference to resolve an installed cask through the API: the bare token
+/// for `homebrew/cask`, otherwise `user/repo/token` from the receipt's tap.
+pub fn installed_cask_reference(cfg: &Config, token: &str) -> String {
+    match cask_receipt(cfg, token).and_then(|r| r.source.tap) {
+        Some(tap) if tap != "homebrew/cask" && !tap.is_empty() => format!("{tap}/{token}"),
+        _ => token.to_string(),
+    }
+}
+
 fn cask_receipt(cfg: &Config, token: &str) -> Option<crate::model::receipt::CaskReceipt> {
     let path = cfg
         .caskroom()

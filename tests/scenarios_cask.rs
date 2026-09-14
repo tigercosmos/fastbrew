@@ -2598,3 +2598,55 @@ fn mixed_formula_and_cask_arguments() {
         "{cask}"
     );
 }
+
+/// `outdated --cask` must see a cask installed from a tap: the candidate is
+/// resolved through the tap recorded in its receipt (as `Caskroom.casks`
+/// loads each installed cask), not looked up in the core index alone.
+#[test]
+fn outdated_cask_follows_a_tap_casks_new_version() {
+    let env = env_or_skip!();
+    let app = "FastbrewTapOutdated.app";
+    let token = "fbtapoutdated";
+    let url = fixture_url(token, "1.0");
+    let sha = env.seed_app_zip(&url, app, "1.0");
+    env.write_cask(token, &app_cask_rb(token, "1.0", &url, &sha, app, ""));
+
+    let out = env.run(&["install", "--cask", &format!("fixture/casks/{token}")]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(env.stdout(&["outdated", "--cask"]), "");
+
+    // The tap moves on to 2.0 (no download needed to notice).
+    let new_url = fixture_url(token, "2.0");
+    env.write_cask(token, &app_cask_rb(token, "2.0", &new_url, &sha, app, ""));
+
+    assert_eq!(env.stdout(&["outdated", "--cask"]), format!("{token}\n"));
+    assert_eq!(
+        env.stdout(&["outdated", "--cask", "--verbose"]),
+        format!("{token} (1.0) != 2.0\n")
+    );
+    // Naming it, qualified or bare, gives the same answer.
+    assert_eq!(
+        env.stdout(&[
+            "outdated",
+            "--cask",
+            "--verbose",
+            &format!("fixture/casks/{token}")
+        ]),
+        format!("{token} (1.0) != 2.0\n")
+    );
+    assert_eq!(
+        env.stdout(&["outdated", "--cask", "--verbose", token]),
+        format!("{token} (1.0) != 2.0\n")
+    );
+
+    let out = env.run(&["uninstall", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
