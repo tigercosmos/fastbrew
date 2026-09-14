@@ -1533,6 +1533,9 @@ fn run_directive(
             Ok(())
         }
         "signal" => {
+            if !automation_allowed() {
+                return Ok(());
+            }
             for pair in signal_pairs(value) {
                 send_signal(&pair.0, &pair.1, opts);
             }
@@ -1541,7 +1544,7 @@ fn run_directive(
         "login_item" => {
             for item in as_list(value).iter().filter_map(Value::as_str) {
                 output::ohai(&format!("Removing login item {item}"));
-                if opts.dry_run {
+                if opts.dry_run || !automation_allowed() {
                     continue;
                 }
                 let script = format!(
@@ -1757,11 +1760,50 @@ fn run_uninstall_script(
     Ok(())
 }
 
+/// Whether fastbrew may drive AppleScript automation (`quit`, `signal`,
+/// `login_item`). Homebrew skips `quit` when there is no GUI session
+/// (`User#gui?`); `FASTBREW_NO_CASK_AUTOMATION=1` additionally suppresses it
+/// so integration tests never raise a TCC prompt.
+fn automation_allowed() -> bool {
+    if std::env::var_os("FASTBREW_NO_CASK_AUTOMATION").is_some_and(|v| !v.is_empty()) {
+        return false;
+    }
+    gui_session()
+}
+
+/// `User#gui?`: the current user owns a console login session.
+fn gui_session() -> bool {
+    let Ok(user) = std::env::var("USER") else {
+        return false;
+    };
+    Command::new("/usr/bin/who")
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|line| line.starts_with(&user) && line.contains("console"))
+        })
+        .unwrap_or(false)
+}
+
 fn quit_application(bundle_id: &str, opts: ArtifactOptions) {
-    output::ohai(&format!("Quitting application '{bundle_id}'..."));
     if opts.dry_run {
+        output::ohai(&format!("Quitting application '{bundle_id}'..."));
         return;
     }
+    if !automation_allowed() {
+        output::opoo(&format!(
+            "Not logged into a GUI; skipping quitting application ID '{bundle_id}'."
+        ));
+        return;
+    }
+    // `AbstractUninstall#uninstall_quit`: `next unless running?(bundle_id)`.
+    // Telling a stopped application to quit would launch it first.
+    if !application_running(bundle_id) {
+        return;
+    }
+    output::ohai(&format!("Quitting application '{bundle_id}'..."));
     let script = format!("tell application id \"{bundle_id}\" to quit");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
