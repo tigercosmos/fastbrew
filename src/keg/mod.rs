@@ -59,19 +59,43 @@ impl Keg {
     }
 }
 
-/// `(files, bytes)`: regular files and symlinks (not directories) under `path`, sizes of regular files.
+/// `(files, bytes)` counted exactly as `DiskUsageExtension#compute_disk_usage`
+/// does: every non-directory entry is a file (`.DS_Store` excluded from the
+/// count), directories and directory symlinks contribute their own `lstat`
+/// size, and a hardlinked inode is only counted once. `brew info`, the install
+/// summary and `Uninstalling ...` all print this pair, so it has to agree with
+/// Homebrew byte for byte.
 pub fn disk_usage(path: &Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(top) = std::fs::symlink_metadata(path) else {
+        return (0, 0);
+    };
+    if top.file_type().is_symlink() && !path.exists() {
+        return (1, 0);
+    }
+    if !path.is_dir() {
+        return (1, std::fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+    }
+
     let mut files = 0u64;
     let mut bytes = 0u64;
+    let mut seen: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
+    // `Pathname#find` yields the root itself as well, and measures with `lstat`,
+    // so a symlink counts its own size rather than its target's.
     for entry in walkdir::WalkDir::new(path).into_iter().flatten() {
-        let ft = entry.file_type();
-        if ft.is_dir() {
+        let Ok(md) = entry.path().symlink_metadata() else {
+            continue;
+        };
+        let ft = md.file_type();
+        if ft.is_dir() || (ft.is_symlink() && entry.path().is_dir()) {
+            bytes += md.len();
             continue;
         }
-        files += 1;
-        if ft.is_file()
-            && let Ok(md) = entry.metadata()
-        {
+        if entry.file_name() != std::ffi::OsStr::new(".DS_Store") {
+            files += 1;
+        }
+        if seen.insert((md.dev(), md.ino())) {
             bytes += md.len();
         }
     }

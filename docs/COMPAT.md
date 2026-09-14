@@ -205,15 +205,26 @@ indent, key order as below; keys `built_prefix`, `padded_prefix`,
 ```
 
 Rules: `changed_files`, `linkage_files`, `binary_relocation_files`,
-`source_modified_time`, `compiler`, `built_on`, `built_prefix`,
-`padded_prefix` come from the manifest tab. `installed_as_dependency` is also
-written (true when not requested explicitly). `runtime_dependencies` lists the
-full transitive runtime closure in dependency order, `declared_directly` true
-for direct deps, each with the installed pkg_version. `homebrew_version`: use
-the Homebrew version fastbrew emulates (constant, currently `6.0.22`); do not
+`source_modified_time`, `compiler`, `stdlib`, `built_on`, `built_prefix`,
+`padded_prefix` come from the manifest tab, falling back to the receipt the
+bottle itself ships when the annotation is absent or was built for another OS
+(`Utils::Bottles.load_tab`). `installed_as_dependency` is *not* written:
+Homebrew 6's `Tab#to_json` dropped it (`tab.rb` calls it "the long-removed
+`installed_as_dependency`") and receipts written by 6.0.x have no such key.
+Receipts from Homebrew 4 and 5 still carry it, so it is read and preserved
+when an old receipt is rewritten. `runtime_dependencies` lists the full
+transitive runtime closure in dependency order, `declared_directly` true for
+direct deps, each with the installed pkg_version. `homebrew_version`: use the
+Homebrew version fastbrew emulates (constant, currently `6.0.22`); do not
 append text, Homebrew parses it as a `Version`. `time` is install time in
 seconds. `source.path` is the API file path. `installed_on_request` is false
 for dependencies.
+
+`N files, SIZE` (`Pathname#abv`, printed by `info`, the install summary line
+and `Uninstalling ...`) comes from `DiskUsageExtension#compute_disk_usage`:
+every non-directory entry counts as a file except `.DS_Store`, the byte total
+adds the `lstat` size of directories and symlinks as well as files, and a
+hardlinked inode is counted once. The count is omitted when it is 1.
 
 ## 4. Relocation
 

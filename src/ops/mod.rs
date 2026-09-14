@@ -5,10 +5,14 @@
 //! returning `Result<()>`. They compose `deps`, `bottle`, `keg`, `services`
 //! and `cask`.
 
+pub mod caveats;
 pub mod cleanup;
 pub mod install;
 pub mod outdated;
 pub mod pin;
+pub mod plan;
 pub mod postinstall;
+pub mod receipt;
+pub mod steps;
 pub mod uninstall;
 pub mod upgrade;
