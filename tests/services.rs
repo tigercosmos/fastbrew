@@ -251,7 +251,7 @@ fn services_command_prints_the_table_and_json() {
 
     // `services info` for a formula without a service reports every flag
     // false rather than failing, like `FormulaWrapper#to_hash`.
-    sandbox.add_keg("jq", "1.8.2", true);
+    sandbox.add_keg("jq", &support::api_pkg_version("jq"), true);
     let info = strip_ansi(&sandbox.stdout(&["services", "info", "jq"]));
     assert_eq!(
         info,

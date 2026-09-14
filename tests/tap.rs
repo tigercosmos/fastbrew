@@ -452,10 +452,8 @@ fn taps_oven_sh_bun_and_reads_it() {
         tap_info.starts_with("oven-sh/bun: Installed\n"),
         "{tap_info}"
     );
-    assert!(
-        tap_info.contains("\n169 formulae\n") || tap_info.contains(" formulae\n"),
-        "{tap_info}"
-    );
+    // The formula count moves with the tap, so only its shape is asserted.
+    assert!(tap_info.contains(" formulae\n"), "{tap_info}");
 
     let out = sandbox.run(&["untap", "oven-sh/bun"]);
     assert!(

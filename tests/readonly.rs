@@ -10,7 +10,9 @@
 //! gated on `FASTBREW_TEST_NETWORK=1`.
 
 mod support;
-use support::{Sandbox, bottle_tag, network_tests_enabled, symlink};
+use support::{
+    Sandbox, api_pkg_version, bottle_tag, network_tests_enabled, older_version, symlink,
+};
 
 /// Skip a test (with a note) when no cached API data is available.
 macro_rules! sandbox_or_skip {
@@ -104,7 +106,10 @@ fn info_prints_homebrews_layout() {
     let sandbox = sandbox_or_skip!();
     let out = sandbox.stdout(&["info", "jq"]);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines[0], "==> jq: stable 1.8.2 (bottled), HEAD");
+    assert_eq!(
+        lines[0],
+        format!("==> jq: stable {} (bottled), HEAD", api_pkg_version("jq"))
+    );
     assert_eq!(
         lines[1],
         "Lightweight and flexible command-line JSON processor"
@@ -147,14 +152,18 @@ fn info_on_an_unknown_formula_matches_homebrews_error() {
 #[test]
 fn info_shows_installed_kegs_and_the_upgrade_arrow() {
     let sandbox = sandbox_or_skip!();
-    sandbox.add_keg("jq", "1.8.1", true);
+    let current = api_pkg_version("jq");
+    let installed = older_version(&current);
+    sandbox.add_keg("jq", &installed, true);
     let out = sandbox.stdout(&["info", "jq"]);
     assert!(
-        out.starts_with("==> jq: 1.8.1 → stable 1.8.2 (bottled), HEAD\n"),
+        out.starts_with(&format!(
+            "==> jq: {installed} → stable {current} (bottled), HEAD\n"
+        )),
         "{out}"
     );
     assert!(out.contains("\nInstalled\n"), "{out}");
-    let keg = sandbox.prefix.join("Cellar/jq/1.8.1");
+    let keg = sandbox.prefix.join(format!("Cellar/jq/{installed}"));
     assert!(out.contains(&format!("{} (", keg.display())), "{out}");
     // Linked kegs are marked with a trailing asterisk.
     assert!(out.contains(") *\n"), "{out}");
@@ -248,7 +257,7 @@ fn deps_include_flags_widen_the_graph() {
 #[test]
 fn deps_uses_recorded_runtime_dependencies_for_installed_formulae() {
     let sandbox = sandbox_or_skip!();
-    sandbox.add_keg("jq", "1.8.2", true);
+    sandbox.add_keg("jq", &api_pkg_version("jq"), true);
 
     // The fake receipt records no runtime dependencies, so Homebrew (and
     // fastbrew) report none for the installed formula rather than walking the
@@ -327,13 +336,15 @@ fn list_is_empty_in_a_fresh_sandbox() {
 #[test]
 fn list_reports_fake_kegs() {
     let sandbox = sandbox_or_skip!();
-    sandbox.add_keg("jq", "1.8.2", true);
-    sandbox.add_keg("oniguruma", "6.9.10_1", false);
+    let jq_version = api_pkg_version("jq");
+    let onig_version = api_pkg_version("oniguruma");
+    sandbox.add_keg("jq", &jq_version, true);
+    sandbox.add_keg("oniguruma", &onig_version, false);
 
     assert_eq!(sandbox.stdout(&["list"]), "jq\noniguruma\n");
     assert_eq!(
         sandbox.stdout(&["list", "--versions"]),
-        "jq 1.8.2\noniguruma 6.9.10_1\n"
+        format!("jq {jq_version}\noniguruma {onig_version}\n")
     );
     assert_eq!(sandbox.stdout(&["list", "--installed-on-request"]), "jq\n");
     assert_eq!(
@@ -344,7 +355,7 @@ fn list_reports_fake_kegs() {
 
     // `list <formula>` prints the keg's files.
     let files = sandbox.stdout(&["list", "jq"]);
-    let keg = sandbox.prefix.join("Cellar/jq/1.8.2");
+    let keg = sandbox.prefix.join(format!("Cellar/jq/{jq_version}"));
     assert!(
         files.contains(&format!("{}\n", keg.join("bin/jq").display())),
         "{files}"
@@ -357,7 +368,7 @@ fn list_reports_fake_kegs() {
     let json = sandbox.stdout(&["list", "--versions", "--json"]);
     let doc: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
     assert_eq!(doc["formulae"][0]["name"], "jq");
-    assert_eq!(doc["formulae"][0]["linked_version"], "1.8.2");
+    assert_eq!(doc["formulae"][0]["linked_version"], jq_version.as_str());
     assert_eq!(doc["casks"].as_array().unwrap().len(), 0);
 
     let out = sandbox.run(&["list", "nosuchformula"]);
@@ -383,38 +394,47 @@ fn outdated_is_empty_in_a_fresh_sandbox() {
 #[test]
 fn outdated_reports_an_old_keg() {
     let sandbox = sandbox_or_skip!();
-    sandbox.add_keg("jq", "1.8.1", true);
+    let current = api_pkg_version("jq");
+    let installed = older_version(&current);
+    sandbox.add_keg("jq", &installed, true);
 
     assert_eq!(sandbox.stdout(&["outdated"]), "jq\n");
-    assert_eq!(sandbox.stdout(&["outdated", "-v"]), "jq (1.8.1) < 1.8.2\n");
+    assert_eq!(
+        sandbox.stdout(&["outdated", "-v"]),
+        format!("jq ({installed}) < {current}\n")
+    );
 
     let json = sandbox.stdout(&["outdated", "--json"]);
     let doc: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(doc["formulae"][0]["name"], "jq");
-    assert_eq!(doc["formulae"][0]["installed_versions"][0], "1.8.1");
-    assert_eq!(doc["formulae"][0]["current_version"], "1.8.2");
+    assert_eq!(
+        doc["formulae"][0]["installed_versions"][0],
+        installed.as_str()
+    );
+    assert_eq!(doc["formulae"][0]["current_version"], current.as_str());
     assert_eq!(doc["formulae"][0]["pinned"], false);
 
     // A pinned formula still shows up, annotated.
     symlink(
-        "../../../Cellar/jq/1.8.1",
+        &format!("../../../Cellar/jq/{installed}"),
         &sandbox.prefix.join("var/homebrew/pinned/jq"),
     );
     assert_eq!(
         sandbox.stdout(&["outdated", "-v"]),
-        "jq (1.8.1) < 1.8.2 [pinned at 1.8.1]\n"
+        format!("jq ({installed}) < {current} [pinned at {installed}]\n")
     );
     assert_eq!(sandbox.stdout(&["list", "--pinned"]), "jq\n");
     assert_eq!(
         sandbox.stdout(&["list", "--pinned", "--versions"]),
-        "jq 1.8.1\n"
+        format!("jq {installed}\n")
     );
 }
 
 #[test]
 fn a_current_but_unlinked_keg_counts_as_outdated() {
     let sandbox = sandbox_or_skip!();
-    sandbox.add_keg("jq", "1.8.2", true);
+    // The keg must be the current version: this is about the missing records.
+    sandbox.add_keg("jq", &api_pkg_version("jq"), true);
     assert_eq!(sandbox.stdout(&["outdated"]), "");
 
     // Drop both the linked and the opt record: Homebrew then treats the keg as
@@ -427,7 +447,7 @@ fn a_current_but_unlinked_keg_counts_as_outdated() {
 #[test]
 fn uses_and_missing_walk_the_graph() {
     let sandbox = sandbox_or_skip!();
-    sandbox.add_keg("jq", "1.8.2", true);
+    sandbox.add_keg("jq", &api_pkg_version("jq"), true);
 
     assert_eq!(
         sandbox.stdout(&["uses", "--installed", "oniguruma"]),
@@ -435,7 +455,7 @@ fn uses_and_missing_walk_the_graph() {
     );
     assert_eq!(sandbox.stdout(&["missing"]).trim(), "oniguruma");
 
-    sandbox.add_keg("oniguruma", "6.9.10_1", false);
+    sandbox.add_keg("oniguruma", &api_pkg_version("oniguruma"), false);
     assert_eq!(sandbox.stdout(&["missing"]), "");
 }
 
@@ -540,14 +560,15 @@ fn info_json_merges_local_state() {
         return;
     }
     let sandbox = sandbox_or_skip!();
-    sandbox.add_keg("jq", "1.8.1", true);
+    let installed = older_version(&api_pkg_version("jq"));
+    sandbox.add_keg("jq", &installed, true);
     let out = sandbox.stdout(&["info", "--json=v2", "jq"]);
     let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
     let formula = &doc["formulae"][0];
     assert_eq!(formula["name"], "jq");
-    assert_eq!(formula["installed"][0]["version"], "1.8.1");
+    assert_eq!(formula["installed"][0]["version"], installed.as_str());
     assert_eq!(formula["installed"][0]["installed_on_request"], true);
-    assert_eq!(formula["linked_keg"], "1.8.1");
+    assert_eq!(formula["linked_keg"], installed.as_str());
     assert_eq!(formula["pinned"], false);
     assert_eq!(formula["outdated"], true);
 }

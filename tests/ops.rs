@@ -11,92 +11,16 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
 
 use assert_cmd::prelude::*;
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
-// Sandbox plumbing (mirrors `tests/readonly.rs` and `scripts/sandbox.sh`)
+// Sandbox plumbing: the shared, API-seeded cache from `tests/support`.
 // ---------------------------------------------------------------------------
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn bottle_tag() -> String {
-    let arch = if cfg!(target_arch = "aarch64") {
-        "arm64_"
-    } else {
-        ""
-    };
-    let product = Command::new("/usr/bin/sw_vers")
-        .arg("-productVersion")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    let major: u32 = product
-        .split('.')
-        .next()
-        .unwrap_or("0")
-        .parse()
-        .unwrap_or(0);
-    let name = match major {
-        27 => "golden_gate",
-        26 => "tahoe",
-        15 => "sequoia",
-        14 => "sonoma",
-        13 => "ventura",
-        12 => "monterey",
-        11 => "big_sur",
-        _ => "unknown",
-    };
-    format!("{arch}{name}")
-}
-
-fn seed_packages_file() -> Option<&'static PathBuf> {
-    static SEED: OnceLock<Option<PathBuf>> = OnceLock::new();
-    SEED.get_or_init(|| {
-        let rel = format!("api/internal/packages.{}.jws.json", bottle_tag());
-        if let Some(cache) = std::env::var_os("HOMEBREW_CACHE") {
-            let path = PathBuf::from(cache).join(&rel);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-        let out = Command::new(repo_root().join("scripts/sandbox.sh"))
-            .arg("env")
-            .output()
-            .ok()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let cache = text.lines().find_map(|line| {
-            line.strip_prefix("export HOMEBREW_CACHE=")
-                .map(|v| v.trim_matches('"').to_string())
-        })?;
-        let path = PathBuf::from(cache).join(&rel);
-        path.is_file().then_some(path)
-    })
-    .as_ref()
-}
-
-/// One cache shared by every test: the 15 MB API file, the fast index and the
-/// bottle downloads are all expensive to recreate.
-fn shared_cache() -> Option<&'static PathBuf> {
-    static CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let seed = seed_packages_file()?;
-            let cache = repo_root().join("target/sandbox-tests/cache");
-            let target = cache.join(format!("api/internal/packages.{}.jws.json", bottle_tag()));
-            std::fs::create_dir_all(target.parent()?).ok()?;
-            if !target.is_file() && std::fs::hard_link(seed, &target).is_err() {
-                std::fs::copy(seed, &target).ok()?;
-            }
-            Some(cache)
-        })
-        .as_ref()
-}
+mod support;
+use support::{bottle_tag, older_version, shared_cache};
 
 struct Sandbox {
     _dir: TempDir,
@@ -590,8 +514,10 @@ fn upgrades_jq_from_a_simulated_older_keg() {
     }
     sb.ok(&["install", "jq"]);
     let new_version = api_version(&sb, "jq");
-    let old_version = "1.8.1";
-    assert_ne!(new_version, old_version, "the fixture assumes jq moved on");
+    // A release older than whatever the API currently carries.
+    let old_version = older_version(&new_version);
+    let old_version = old_version.as_str();
+    assert_ne!(new_version, old_version, "the older keg must be older");
 
     // Pretend the older release is what is installed: unlink, rename the keg,
     // correct the receipt's version fields, link it again.

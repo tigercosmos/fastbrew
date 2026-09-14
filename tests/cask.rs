@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use fastbrew::api::index::Index;
 use fastbrew::cask::artifacts;
 use fastbrew::cask::config::CaskDirs;
 use fastbrew::cask::install::{CaskInstallOptions, install_cask_entry};
@@ -21,6 +22,7 @@ use fastbrew::cask::uninstall::uninstall_installed_cask;
 use fastbrew::cask::{self, download};
 use fastbrew::config::Config;
 use fastbrew::model::CaskEntry;
+use fastbrew::platform::Host;
 use serde_json::{Value, json};
 
 // ------------------------------------------------------------ fixtures
@@ -313,38 +315,18 @@ fn artifact_specs_match_the_receipt_shape() {
 
 // ------------------------------------------------------- network test
 
-/// The `rectangle` entry as the internal API serves it.
-fn rectangle_entry() -> CaskEntry {
-    entry(
-        "rectangle",
-        json!({
-            "auto_updates": true,
-            "depends_on_args": {":macos": ":any"},
-            "desc": "Move and resize windows using keyboard shortcuts or snap areas",
-            "homepage": "https://rectangleapp.com/",
-            "names": ["Rectangle"],
-            "ruby_source_path": "Casks/r/rectangle.rb",
-            "sha256": "5cfbe9b68a558458302c5305cb7060491f68029338e2a4561c54a2981eb8622f",
-            "tap_string": "homebrew/cask",
-            "url_args": [
-                "https://github.com/rxhanson/Rectangle/releases/download/v1.100/Rectangle1.100.dmg"
-            ],
-            "version": "1.100",
-            "raw_artifacts": [
-                [":uninstall", {":quit": "com.knollsoft.Rectangle", ":login_item": "Rectangle"}],
-                [":app", ["Rectangle.app"]],
-                [":zap", {":trash": [
-                    "~/Library/Application Scripts/com.knollsoft.RectangleLauncher",
-                    "~/Library/Application Support/Rectangle",
-                    "~/Library/Caches/com.knollsoft.Rectangle",
-                    "~/Library/Containers/com.knollsoft.RectangleLauncher",
-                    "~/Library/HTTPStorages/com.knollsoft.Rectangle",
-                    "~/Library/Preferences/com.knollsoft.Rectangle.plist",
-                    "~/Library/WebKit/com.knollsoft.Rectangle"
-                ]}]
-            ]
-        }),
-    )
+/// The `rectangle` entry exactly as the sandbox's API file serves it, so the
+/// test follows the cask's current version and checksum instead of a pinned
+/// release. `None` when the sandbox has no cached API file.
+fn rectangle_entry(cfg: &Config) -> Option<CaskEntry> {
+    let index = Index::load(cfg, &Host::detect().bottle_tag()).ok()?;
+    index.cask("rectangle")
+}
+
+/// The file name Homebrew resolves a cask download to: the last path segment
+/// of its URL.
+fn url_basename(url: &str) -> &str {
+    url.rsplit('/').next().unwrap_or(url)
 }
 
 #[test]
@@ -361,7 +343,11 @@ fn installs_and_uninstalls_rectangle() {
     let root = sandbox_root();
     let cfg = sandbox_config(&root);
     let dirs = CaskDirs::resolve(&cfg, &[]);
-    let cask = rectangle_entry();
+    let Some(cask) = rectangle_entry(&cfg) else {
+        eprintln!("skipping: no cached API file; run through scripts/sandbox.sh");
+        return;
+    };
+    let version = cask.version.clone().expect("rectangle is versioned");
     reset(&cfg, &dirs, &cask.token, "Rectangle.app");
 
     install_cask_entry(&cfg, None, &dirs, &cask, &CaskInstallOptions::default())
@@ -374,19 +360,27 @@ fn installs_and_uninstalls_rectangle() {
         dirs.appdir.display()
     );
     let installed = cask::installed_cask(&cfg, &cask.token).expect("rectangle is installed");
-    assert_eq!(installed.version, "1.100");
+    assert_eq!(installed.version, version);
     let receipt = read_json(&installed.receipt_path());
-    assert_eq!(receipt["source"]["version"], json!("1.100"));
-    assert_eq!(
-        receipt["uninstall_artifacts"][1],
-        json!({"app": ["Rectangle.app"]})
+    assert_eq!(receipt["source"]["version"], json!(version));
+    assert!(
+        receipt["uninstall_artifacts"]
+            .as_array()
+            .expect("an array")
+            .contains(&json!({"app": ["Rectangle.app"]})),
+        "{}",
+        receipt["uninstall_artifacts"]
     );
 
     // The download is cached under Homebrew's shared naming.
     let url = cask.url().unwrap();
-    let cached = download::cached_location(&cfg, url, "Rectangle1.100.dmg");
+    let cached = download::cached_location(&cfg, url, url_basename(url));
     assert!(cached.is_file(), "{} is missing", cached.display());
-    assert!(cfg.cache.join("Cask/rectangle--1.100.dmg").is_symlink());
+    assert!(
+        cfg.cache
+            .join(format!("Cask/rectangle--{version}.dmg"))
+            .is_symlink()
+    );
 
     uninstall_installed_cask(&cfg, &dirs, &installed, Some(&cask), true, false)
         .expect("uninstall rectangle");
