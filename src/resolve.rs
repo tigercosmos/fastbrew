@@ -229,7 +229,85 @@ pub fn resolve_formula(cfg: &Config, index: &Index, reference: &str) -> Result<F
         name: reference.to_string(),
         kind: PackageKind::Formula,
         suggestions: suggestions(index, &name, Kind::Formula),
+        dependent: None,
     })
+}
+
+/// `Formulary.from_rack`: an installed formula resolves against the tap its
+/// receipt records, so a keg poured from `user/repo` is never mistaken for the
+/// core formula of the same name. `list`, `outdated` and `upgrade` walk racks,
+/// whose directory names are bare.
+pub fn resolve_installed(cfg: &Config, index: &Index, name: &str) -> Result<FormulaEntry> {
+    if let Some(tap) = installed_tap(cfg, name)
+        && let Ok(entry) = resolve_formula(cfg, index, &format!("{tap}/{name}"))
+    {
+        return Ok(entry);
+    }
+    resolve_formula(cfg, index, name)
+}
+
+/// `Tab.for_keg(rack).tap` when it names a third-party tap.
+pub fn installed_tap(cfg: &Config, name: &str) -> Option<String> {
+    let tap = crate::keg::latest_keg(cfg, name)?
+        .receipt()
+        .ok()?
+        .tap()?
+        .to_string();
+    (tap.contains('/') && tap != "homebrew/core").then_some(tap)
+}
+
+/// `Dependency#to_formula` for a `depends_on` reached from `dependent`.
+///
+/// `user/repo/name` selects that tap. A bare name takes `Formulary`'s order:
+/// the core API first, then — because a tap's formulae are loadable from
+/// within the tap — the dependent's own tap, then `FromNameLoader` over every
+/// other installed tap. A required dependency that resolves nowhere raises
+/// `FormulaUnavailableError` naming the dependent; it is never skipped.
+pub fn resolve_dependency(
+    cfg: &Config,
+    index: &Index,
+    name: &str,
+    dependent: &FormulaEntry,
+) -> Result<FormulaEntry> {
+    if name.contains('/') {
+        return resolve_formula(cfg, index, name).map_err(|e| with_dependent(e, dependent));
+    }
+    if let Some(entry) = index.formula(name) {
+        return Ok(entry);
+    }
+    if !is_core_tap(&dependent.tap)
+        && let Some(tap) = Tap::parse(&dependent.tap)
+        && tap.is_installed(cfg)
+    {
+        let meta = crate::api::taps::load_tap(cfg, &tap, &Host::detect().bottle_tag());
+        if let Some(found) = meta.formula(name) {
+            return found.map(|f| f.entry).map_err(needs_delegation);
+        }
+    }
+    resolve_formula(cfg, index, name).map_err(|e| with_dependent(e, dependent))
+}
+
+/// `homebrew/core` (or an entry with no tap at all) is the API, not a tap.
+pub fn is_core_tap(tap: &str) -> bool {
+    tap.is_empty() || tap == "homebrew/core"
+}
+
+/// Attach `FormulaUnavailableError#dependent` to a failed dependency lookup.
+fn with_dependent(error: Error, dependent: &FormulaEntry) -> Error {
+    match error {
+        Error::Unavailable {
+            name,
+            kind,
+            suggestions,
+            ..
+        } => Error::Unavailable {
+            name,
+            kind,
+            suggestions,
+            dependent: Some(dependent.full_name()),
+        },
+        other => other,
+    }
 }
 
 /// A formula `rubylite` could not extract has to go to the Ruby `brew`.
@@ -254,6 +332,7 @@ fn tap_formula(cfg: &Config, reference: &str, tap_name: &str, name: &str) -> Res
             name: reference.to_string(),
             kind: PackageKind::Formula,
             suggestions: spell_check(name, &meta.formula_names()),
+            dependent: None,
         }),
     }
 }

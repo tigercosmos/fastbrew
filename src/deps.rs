@@ -86,15 +86,18 @@ pub fn uses_from_macos_is_dependency(since_major: u32) -> bool {
 }
 
 /// Direct dependencies of `formula` after applying `opts` and the
-/// `uses_from_macos` platform rule.
+/// `uses_from_macos` platform rule, read from the entry's own stanzas.
+///
+/// This is the only source for a tap formula, which has no row in the packed
+/// core index; `entry_dependency_names` picks it for those.
 pub fn direct_dependencies(
-    _cfg: &Config,
     formula: &FormulaEntry,
     opts: DepOptions,
+    is_root: bool,
 ) -> Vec<Dependency> {
     let mut out = Vec::new();
     for dep in formula.dependencies() {
-        if opts.keeps(tags_to_flags(&dep), true) {
+        if opts.keeps(tags_to_flags(&dep), is_root) {
             out.push(dep);
         }
     }
@@ -107,11 +110,32 @@ pub fn direct_dependencies(
         if !uses_from_macos_is_dependency(since) {
             continue;
         }
-        if opts.keeps(tags_to_flags(&ufm.dep), true) {
+        if opts.keeps(tags_to_flags(&ufm.dep), is_root) {
             out.push(ufm.dep);
         }
     }
     out
+}
+
+/// Direct dependency references of a *resolved* entry.
+///
+/// A core formula uses the index's compact records (no JSON parsing); a tap
+/// formula — or one rebuilt from a receipt — carries its own `depends_on`
+/// list, which the index knows nothing about. References keep whatever
+/// qualification the formula wrote, so `depends_on "user/repo/x"` survives.
+pub fn entry_dependency_names(
+    index: &Index,
+    entry: &FormulaEntry,
+    opts: DepOptions,
+    is_root: bool,
+) -> Vec<String> {
+    if crate::resolve::is_core_tap(&entry.tap) && index.has_formula(&entry.name) {
+        return direct_dependency_names(index, &entry.name, opts, is_root);
+    }
+    direct_dependencies(entry, opts, is_root)
+        .into_iter()
+        .map(|d| d.name)
+        .collect()
 }
 
 /// Direct dependency names read straight from the index's compact records.
@@ -167,20 +191,118 @@ fn visit(
     stack.pop();
 }
 
-/// Full transitive closure in install order (dependencies first).
+/// Full transitive closure in install order (dependencies first), starting
+/// from a *resolved* entry.
+///
+/// Every dependency reference is resolved through
+/// [`crate::resolve::resolve_dependency`], so a tap formula's dependencies are
+/// found in the core API, in its own tap or in another installed tap, and a
+/// `user/repo/name` reference selects that tap. A required dependency that
+/// resolves nowhere is a `FormulaUnavailableError` naming the dependent
+/// (`Formula#recursive_dependencies`), never a silent omission.
 pub fn recursive_dependencies(
-    _cfg: &Config,
+    cfg: &Config,
     index: &Index,
     formula: &FormulaEntry,
     opts: DepOptions,
 ) -> Result<Vec<FormulaEntry>> {
-    Ok(recursive_dependency_names(index, &formula.name, opts)
-        .into_iter()
-        .filter_map(|n| index.formula(&n))
-        .collect())
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut order: Vec<FormulaEntry> = Vec::new();
+    let mut stack: Vec<String> = Vec::new();
+    visit_entry(
+        cfg, index, formula, opts, true, &mut seen, &mut order, &mut stack,
+    )?;
+    Ok(order)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_entry(
+    cfg: &Config,
+    index: &Index,
+    entry: &FormulaEntry,
+    opts: DepOptions,
+    is_root: bool,
+    seen: &mut HashSet<String>,
+    order: &mut Vec<FormulaEntry>,
+    stack: &mut Vec<String>,
+) -> Result<()> {
+    let full = entry.full_name();
+    if stack.contains(&full) {
+        return Ok(()); // circular
+    }
+    stack.push(full);
+    for reference in entry_dependency_names(index, entry, opts, is_root) {
+        let dep = crate::resolve::resolve_dependency(cfg, index, &reference, entry)?;
+        visit_entry(cfg, index, &dep, opts, false, seen, order, stack)?;
+        if seen.insert(dep.full_name()) {
+            order.push(dep);
+        }
+    }
+    stack.pop();
+    Ok(())
+}
+
+/// The same walk as [`recursive_dependencies`], but a reference that resolves
+/// nowhere is reported as itself instead of failing the walk.
+///
+/// The read-only listings (`deps`, `uses`, `info`) show what a formula
+/// declares even when part of it is unavailable; refusing to guess is the
+/// install plan's job.
+pub fn recursive_dependency_references(
+    cfg: &Config,
+    index: &Index,
+    formula: &FormulaEntry,
+    opts: DepOptions,
+) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut order: Vec<String> = Vec::new();
+    let mut stack: Vec<String> = Vec::new();
+    walk_references(
+        cfg, index, formula, opts, true, &mut seen, &mut order, &mut stack,
+    );
+    order
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_references(
+    cfg: &Config,
+    index: &Index,
+    entry: &FormulaEntry,
+    opts: DepOptions,
+    is_root: bool,
+    seen: &mut HashSet<String>,
+    order: &mut Vec<String>,
+    stack: &mut Vec<String>,
+) {
+    let full = entry.full_name();
+    if stack.contains(&full) {
+        return; // circular
+    }
+    stack.push(full);
+    for reference in entry_dependency_names(index, entry, opts, is_root) {
+        match crate::resolve::resolve_dependency(cfg, index, &reference, entry) {
+            Ok(dep) => {
+                walk_references(cfg, index, &dep, opts, false, seen, order, stack);
+                if seen.insert(dep.name.clone()) {
+                    order.push(dep.name);
+                }
+            }
+            Err(_) => {
+                let name = short_name(&reference).to_string();
+                if seen.insert(name.clone()) {
+                    order.push(name);
+                }
+            }
+        }
+    }
+    stack.pop();
 }
 
 /// Formulae (from the index or installed set) that depend on `name`.
+///
+/// An installed formula is inverted through the entry its receipt's tap
+/// resolves to, so a keg poured from a third-party tap contributes the
+/// dependencies that tap declares rather than the core formula's.
 pub fn uses(
     cfg: &Config,
     index: &Index,
@@ -201,6 +323,15 @@ pub fn uses(
             if candidate == name {
                 return false;
             }
+            // An installed candidate may not be the core formula of that
+            // name; resolve it before inverting its graph.
+            if installed_only
+                && let Some(tap) = crate::resolve::installed_tap(cfg, candidate)
+                && let Ok(entry) =
+                    crate::resolve::resolve_formula(cfg, index, &format!("{tap}/{candidate}"))
+            {
+                return entry_depends_on(cfg, index, &entry, name, recursive, opts);
+            }
             if recursive {
                 recursive_dependency_names(index, candidate, opts)
                     .iter()
@@ -215,6 +346,26 @@ pub fn uses(
     out.sort();
     out.dedup();
     Ok(out)
+}
+
+/// Whether `entry` depends on the formula named `name` (by rack name).
+fn entry_depends_on(
+    cfg: &Config,
+    index: &Index,
+    entry: &FormulaEntry,
+    name: &str,
+    recursive: bool,
+    opts: DepOptions,
+) -> bool {
+    if recursive {
+        recursive_dependency_references(cfg, index, entry, opts)
+            .iter()
+            .any(|d| d == name)
+    } else {
+        entry_dependency_names(index, entry, opts, true)
+            .iter()
+            .any(|d| short_name(d) == name)
+    }
 }
 
 /// Tokens of every cask staged in the Caskroom.
