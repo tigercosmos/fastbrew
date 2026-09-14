@@ -1357,6 +1357,62 @@ fn an_interrupted_install_leaves_no_half_keg_behind() {
 }
 
 #[test]
+fn a_failed_dependency_leaves_no_keg_for_the_next_run_to_mistake() {
+    let sb = sandbox_or_skip!();
+    network_or_skip!();
+
+    let jq_version = api_pkg_version("jq");
+    let oniguruma_version = api_pkg_version("oniguruma");
+
+    // Make oniguruma's pour fail by putting a plain file where its rack goes.
+    // Everything is downloaded and extracted before anything is finished, so
+    // jq's bottle is already unpacked when its dependency fails.
+    std::fs::create_dir_all(sb.prefix.join("Cellar")).unwrap();
+    std::fs::write(sb.prefix.join("Cellar/oniguruma"), b"in the way\n").unwrap();
+
+    let out = fails(&sb, &["install", "jq"]);
+    assert!(out.contains("Error: oniguruma: "), "{out}");
+    assert!(
+        out.contains("Error: jq: skipped because a dependency failed to install"),
+        "{out}"
+    );
+    assert!(
+        !keg(&sb, "jq", &jq_version).exists(),
+        "the half-installed keg is removed:\n{out}"
+    );
+    assert!(!sb.prefix.join("var/homebrew/linked/jq").exists(), "{out}");
+
+    // A keg that survived some other way still must not be mistaken for an
+    // installation, because it carries no receipt.
+    std::fs::create_dir_all(keg(&sb, "jq", &jq_version).join("bin")).unwrap();
+
+    std::fs::remove_file(sb.prefix.join("Cellar/oniguruma")).unwrap();
+    let retry = ok(&sb, &["install", "jq"]);
+    assert!(
+        !retry.contains("already installed"),
+        "the retry does the work:\n{retry}"
+    );
+    assert!(
+        keg(&sb, "jq", &jq_version)
+            .join("INSTALL_RECEIPT.json")
+            .is_file(),
+        "{retry}"
+    );
+    assert!(
+        keg(&sb, "oniguruma", &oniguruma_version).is_dir(),
+        "{retry}"
+    );
+    assert!(
+        sb.prefix.join("var/homebrew/linked/jq").is_symlink(),
+        "{retry}"
+    );
+    assert_eq!(
+        ok(&sb, &["list", "--versions", "jq"]).trim(),
+        format!("jq {jq_version}")
+    );
+}
+
+#[test]
 fn a_second_install_of_the_same_formula_hits_the_lock() {
     let sb = sandbox_or_skip!();
     network_or_skip!();

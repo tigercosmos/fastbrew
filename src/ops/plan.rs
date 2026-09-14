@@ -355,7 +355,14 @@ fn optlinked_version(cfg: &Config, name: &str) -> Option<String> {
 /// restricted to the stable-bottle cases fastbrew handles.
 pub fn already_installed(cfg: &Config, formula: &FormulaEntry, only_dependencies: bool) -> Already {
     let name = &formula.name;
-    let kegs = keg::installed_kegs(cfg, name);
+    // A directory in the rack without `INSTALL_RECEIPT.json` is an install
+    // that never finished, not an installation: Homebrew removes the keg when
+    // a pour fails, so a receipt is always there. Counting one would make a
+    // retry print "already installed" and stop without doing the work.
+    let kegs: Vec<Keg> = keg::installed_kegs(cfg, name)
+        .into_iter()
+        .filter(|k| k.path.join("INSTALL_RECEIPT.json").is_file())
+        .collect();
     if kegs.is_empty() {
         return Already::NotInstalled;
     }

@@ -160,6 +160,10 @@ pub fn install_formulae_with(
                 "{}: skipped because a dependency failed to install",
                 item.name()
             ));
+            // Its bottle is already unpacked: steps 4 and 5 run for the whole
+            // plan before any of it is finished. Leaving the keg would make
+            // the next run believe the formula is installed, so it goes.
+            discard_unfinished_keg(cfg, item);
             failed.insert(item.name().to_string());
             continue;
         }
@@ -192,6 +196,7 @@ pub fn install_formulae_with(
             }
             Err(e) => {
                 output::onoe(&format!("{}: {e}", item.name()));
+                discard_unfinished_keg(cfg, item);
                 failed.insert(item.name().to_string());
             }
         }
@@ -637,6 +642,23 @@ fn pour_all(
         })
         .collect();
     results.into_iter().collect()
+}
+
+/// Remove a keg this run unpacked but never finished.
+///
+/// A directory in the rack without `INSTALL_RECEIPT.json` is not an
+/// installation: `FormulaInstaller#install` removes the keg when anything after
+/// the pour raises, and nothing else ever creates one. Keeping it would make
+/// the next `install` report "already installed, it's just not linked" and stop
+/// without ever finishing the work.
+fn discard_unfinished_keg(cfg: &Config, item: &Item) {
+    let keg = item.keg(cfg).path;
+    if !keg.is_dir() || keg.join("INSTALL_RECEIPT.json").is_file() {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(&keg);
+    // `remove_dir` only succeeds on an empty rack, which is what we want.
+    let _ = std::fs::remove_dir(cfg.rack(item.name()));
 }
 
 fn pour_one(cfg: &Config, item: &Item, download: &Download, _opts: &InstallOptions) -> Result<()> {
