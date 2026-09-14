@@ -1,6 +1,7 @@
 //! `config`, `commands`, `completions`, `shellenv`, `help`, `update` and the
 //! `--path` pseudo-commands (`--prefix`, `--cellar`, `--cache`,
-//! `--repository`, `--caskroom`, `--version`, `--env`, `--taps`).
+//! `--repository`, `--caskroom`, `--version`, `--taps`). `--env` needs the
+//! full build environment, so it is delegated to the Ruby `brew`.
 
 use std::path::{Path, PathBuf};
 
@@ -23,7 +24,6 @@ pub const BUILTIN_COMMANDS: &[&str] = &[
     "--cache",
     "--caskroom",
     "--cellar",
-    "--env",
     "--prefix",
     "--repository",
     "--taps",
@@ -73,7 +73,6 @@ pub const COMMAND_USAGE: &[(&str, &str)] = &[
     ("--cache", "fastbrew --cache [FORMULA|CASK...]"),
     ("--caskroom", "fastbrew --caskroom [CASK...]"),
     ("--cellar", "fastbrew --cellar [FORMULA...]"),
-    ("--env", "fastbrew --env"),
     ("--prefix", "fastbrew --prefix [--installed] [FORMULA...]"),
     ("--repository", "fastbrew --repository [TAP...]"),
     ("--taps", "fastbrew --taps"),
@@ -192,7 +191,6 @@ pub fn is_path_command(name: &str) -> bool {
             | "--repository"
             | "--caskroom"
             | "--version"
-            | "--env"
             | "--taps"
     )
 }
@@ -285,14 +283,6 @@ pub fn run_path_command(ctx: &Ctx, name: &str, args: &[String]) -> Result<()> {
             }
         }
         "--taps" => println!("{}", cfg.taps_dir().display()),
-        "--env" => {
-            println!("export HOMEBREW_PREFIX=\"{}\"", cfg.prefix.display());
-            println!("export HOMEBREW_CELLAR=\"{}\"", cfg.cellar.display());
-            println!(
-                "export HOMEBREW_REPOSITORY=\"{}\"",
-                cfg.repository.display()
-            );
-        }
         other => return Err(Error::user(format!("Unknown command: {other}"))),
     }
     Ok(())
@@ -324,8 +314,17 @@ pub fn config(ctx: &Ctx) -> Result<()> {
     println!("HOMEBREW_CACHE: {}", cfg.cache.display());
     println!("HOMEBREW_LOGS: {}", cfg.logs.display());
     println!("HOMEBREW_TEMP: {}", cfg.temp.display());
-    if cfg.no_auto_update {
-        println!("HOMEBREW_NO_AUTO_UPDATE: set");
+    // `homebrew_env_config`: every variable the user actually set, boolean
+    // ones as `set`. Only the variables fastbrew honours (`COMPAT.md` 10).
+    for name in ENV_VARS {
+        let Some(value) = std::env::var_os(name).filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        if name.starts_with("HOMEBREW_NO_") || name.ends_with("_TOKEN") {
+            println!("{name}: set");
+        } else {
+            println!("{name}: {}", value.to_string_lossy());
+        }
     }
     println!("CPU: {}", host.arch.as_str());
     match host.macos {
@@ -335,6 +334,37 @@ pub fn config(ctx: &Ctx) -> Result<()> {
     println!("Bottle tag: {}", ctx.tag);
     Ok(())
 }
+
+/// The `HOMEBREW_*` and `FASTBREW_*` variables `config` reports, in the order
+/// `docs/COMPAT.md` 10 lists them. Paths already printed above are omitted.
+const ENV_VARS: &[&str] = &[
+    "HOMEBREW_API_DOMAIN",
+    "HOMEBREW_ARTIFACT_DOMAIN",
+    "HOMEBREW_AUTO_UPDATE_SECS",
+    "HOMEBREW_API_AUTO_UPDATE_SECS",
+    "HOMEBREW_BOTTLE_DOMAIN",
+    "HOMEBREW_CASK_OPTS",
+    "HOMEBREW_CLEANUP_MAX_AGE_DAYS",
+    "HOMEBREW_COLOR",
+    "HOMEBREW_CURL_RETRIES",
+    "HOMEBREW_DEBUG",
+    "HOMEBREW_DOWNLOAD_CONCURRENCY",
+    "HOMEBREW_GITHUB_PACKAGES_TOKEN",
+    "HOMEBREW_GITHUB_PACKAGES_USER",
+    "HOMEBREW_INSTALL_BADGE",
+    "HOMEBREW_NO_ANALYTICS",
+    "HOMEBREW_NO_AUTO_UPDATE",
+    "HOMEBREW_NO_COLOR",
+    "HOMEBREW_NO_EMOJI",
+    "HOMEBREW_NO_ENV_HINTS",
+    "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK",
+    "HOMEBREW_NO_INSTALL_CLEANUP",
+    "HOMEBREW_NO_INSTALL_UPGRADE",
+    "HOMEBREW_VERBOSE",
+    "FASTBREW_BREW",
+    "FASTBREW_NO_DELEGATE",
+    "FASTBREW_REQUIRE_SANDBOX",
+];
 
 fn api_date(generated_at: u64) -> String {
     use chrono::{TimeZone, Utc};

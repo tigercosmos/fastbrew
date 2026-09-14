@@ -929,13 +929,17 @@ pub fn list(ctx: &Ctx, args: &ListArgs) -> Result<()> {
     Ok(())
 }
 
-/// `Formula#full_name` for an installed keg: the receipt records which tap it
-/// came from, which is the only source for a formula the API never had.
+/// `Formula#full_name` for a name that may come from a tap: the index first,
+/// then the tap metadata, then the keg receipt (the only source for a formula
+/// the API never had).
 fn installed_full_name(ctx: &Ctx, name: &str) -> String {
     if let Ok(index) = ctx.index()
         && let Some(f) = index.formula(name)
     {
         return f.full_name();
+    }
+    if let Some(meta) = ctx.taps().taps_with_formula(name).first() {
+        return meta.tap.full_package_name(name);
     }
     let tap = keg::latest_keg(&ctx.cfg, name)
         .and_then(|k| k.receipt().ok())
@@ -1355,7 +1359,8 @@ pub fn deps(ctx: &Ctx, args: &DepsArgs) -> Result<()> {
 
     if args.tree {
         for root in &roots {
-            println!("{root}");
+            // `puts_deps_tree` labels each root with its full name.
+            println!("{}", installed_full_name(ctx, root));
             let mut seen: Vec<String> = Vec::new();
             print_tree(ctx, index, root, "", opts, recursive, &mut seen, args);
             println!();

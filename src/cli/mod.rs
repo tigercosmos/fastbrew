@@ -157,14 +157,19 @@ fn dispatch(argv: Vec<OsString>) -> Result<i32> {
     // which would otherwise read them as flags of the root command.
     if let Some(name) = normalized.get(1).and_then(|a| a.to_str())
         && name.starts_with("--")
-        && misc::is_path_command(name)
+        && name != "--help"
     {
-        let rest: Vec<String> = normalized[2..]
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        misc::run_path_command(&ctx, name, &rest)?;
-        return Ok(i32::from(output::is_failed()));
+        if misc::is_path_command(name) {
+            let rest: Vec<String> = normalized[2..]
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            misc::run_path_command(&ctx, name, &rest)?;
+            return Ok(i32::from(output::is_failed()));
+        }
+        // `--env` and the rest of Homebrew's `--`-commands are the Ruby's.
+        ctx.delegate(&format!("`{name}` is not implemented by fastbrew"))?;
+        return Ok(1);
     }
 
     commands::dispatch(&ctx, &normalized)?;
