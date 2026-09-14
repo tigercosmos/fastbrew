@@ -799,6 +799,37 @@ fn a_dry_run_cleanup_keeps_an_empty_rack() {
     assert!(!rack.exists(), "the real run removes it");
 }
 
+/// A reinstall backup a killed run left behind is not an installed version,
+/// and `cleanup` sweeps it like an interrupted extraction's staging directory
+/// (`Cleanup#cleanup_reinstall_kegs`).
+#[test]
+fn cleanup_sweeps_a_leftover_reinstall_backup() {
+    let Some(sb) = sandbox() else { return };
+
+    let rack = sb.prefix.join("Cellar/fbleftover");
+    let backup = rack.join("1.0.reinstall");
+    std::fs::create_dir_all(backup.join("bin")).unwrap();
+    std::fs::write(backup.join("bin/fbleftover"), "#!/bin/sh\n").unwrap();
+
+    // A rack holding nothing but a backup holds no installed version.
+    let versions = sb.ok(&["list", "--versions"]);
+    assert!(!versions.contains("fbleftover"), "{versions}");
+
+    let dry = sb.ok(&["cleanup", "--dry-run", "fbleftover"]);
+    assert!(
+        dry.contains(&format!("Would remove: {}", backup.display())),
+        "{dry}"
+    );
+    assert!(backup.is_dir(), "a dry run writes nothing");
+
+    let out = sb.ok(&["cleanup", "fbleftover"]);
+    assert!(
+        out.contains(&format!("Removing: {}", backup.display())),
+        "{out}"
+    );
+    assert!(!rack.exists(), "the rack goes with it:\n{out}");
+}
+
 // ---------------------------------------------------------------------------
 // Unit-level tests that need no network
 // ---------------------------------------------------------------------------
