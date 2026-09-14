@@ -169,6 +169,17 @@ Cache naming (shared with Homebrew):
   Please wait for it to finish or terminate it to continue.
   ```
 
+  DIFFERENCE: Homebrew takes this lock for `install`, `reinstall`, `upgrade`
+  and a plain `uninstall` (`Keg#lock`), but not for `uninstall --force` nor for
+  `cleanup`, so either can delete a keg another `brew` is installing into.
+  fastbrew takes it for every destructive operation on a rack: uninstall
+  (forced or not), autoremove, `link`/`unlink`, and cleanup's keg removal.
+  `uninstall` and `link` fail with the message above; `cleanup` prints it as a
+  `Warning:` and skips that rack, the way `Cleanup#cleanup_keg` skips a keg it
+  cannot remove, then carries on with the rest of the run. A `--dry-run` of any
+  of them writes nothing and takes no lock. The install path releases its locks
+  before its final `brew cleanup <formula>` step, which takes them again.
+
 `INSTALL_RECEIPT.json` written after pouring a bottle (pretty JSON, 2-space
 indent, key order as below; keys `built_prefix`, `padded_prefix`,
 `linkage_files`, `binary_relocation_files`, `relocated_build_prefix`,
@@ -456,7 +467,7 @@ exit status at 0.
 `list`: names in columns like `ls -C` on a TTY, one per line otherwise.
 `list --versions`: `name version [version ...]`. `outdated`: names; with
 `--verbose`: `name (installed) < current [pinned at x]`. Install progress:
-`==> Fetching hello`, `==> Downloading https://ghcr.io/v2/homebrew/core/hello/manifests/2.12.3-1`, `Already downloaded: <path>` or a progress bar, `==> Pouring hello--2.12.3.arm64_tahoe.bottle.1.tar.gz`, `🍺  /opt/homebrew/Cellar/hello/2.12.3: 8 files, 186KB`. `Pouring` names the bottle, not the hashed cache file it was read from. Dependencies print `==> Installing dependencies for jq: oniguruma` then `==> Installing jq dependency: oniguruma`, and after everything `==> Installing jq`; with several formulae named, each gets its own heading listing only its own dependencies. Uninstall prints `Uninstalling /opt/homebrew/Cellar/hello/2.12.3... (8 files, 186KB)`, and `--force` prints the rack's *name*: `Uninstalling hello... (8 files, 186KB)`. Dependents block: `Error: Refusing to uninstall /opt/homebrew/Cellar/oniguruma/6.9.10\nbecause it is required by jq, which is currently installed.\nYou can override this and force removal with:\n  brew uninstall --ignore-dependencies oniguruma`.
+`==> Fetching hello`, `==> Downloading https://ghcr.io/v2/homebrew/core/hello/manifests/2.12.3-1`, `Already downloaded: <path>` or a progress bar, `==> Pouring hello--2.12.3.arm64_tahoe.bottle.1.tar.gz`, `🍺  /opt/homebrew/Cellar/hello/2.12.3: 8 files, 186KB`. `Pouring` names the bottle, not the hashed cache file it was read from. Dependencies print `==> Installing dependencies for jq: oniguruma` then `==> Installing jq dependency: oniguruma`, and after everything `==> Installing jq`; with several formulae named, each gets its own heading listing only its own dependencies. DIFFERENCE: a formula that is both named on the command line and another named formula's dependency is installed once, as a requested formula, and is left out of the dependency headings and of `--dry-run`'s `Would install <n> dependencies for <formula>:` block. Homebrew builds one `FormulaInstaller` per named formula and lists such a formula in both places (its `print_dry_run_dependencies` takes a `skip_formula_names:` argument for exactly this, which `install` does not pass). Uninstall prints `Uninstalling /opt/homebrew/Cellar/hello/2.12.3... (8 files, 186KB)`, and `--force` prints the rack's *name*: `Uninstalling hello... (8 files, 186KB)`. Dependents block: `Error: Refusing to uninstall /opt/homebrew/Cellar/oniguruma/6.9.10\nbecause it is required by jq, which is currently installed.\nYou can override this and force removal with:\n  brew uninstall --ignore-dependencies oniguruma`.
 
 Caveats come last, after the summary line and after `==> Running `brew cleanup
 <name>`...`: `Homebrew::Install.finish_installation` cleans up and then calls

@@ -169,8 +169,27 @@ fn print_no_install_cleanup_disable_message(cfg: &Config) {
 }
 
 /// `Cleanup#cleanup_formula`.
+///
+/// Removing a keg is as destructive as `uninstall`, so it happens under the
+/// rack's formula lock. `cleanup_keg` skips a keg it cannot remove with a
+/// warning and carries on with the rest of the run, so contention is reported
+/// the same way rather than aborting everything.
 fn cleanup_formula(sweeper: &mut Sweeper<'_>, index: &Index, name: &str) {
-    for keg in eligible_kegs_for_cleanup(sweeper.cfg, index, name, sweeper.quiet) {
+    let eligible = eligible_kegs_for_cleanup(sweeper.cfg, index, name, sweeper.quiet);
+    let _lock = if eligible.is_empty() || sweeper.opts.dry_run {
+        // A dry run removes nothing, so it needs no lock.
+        None
+    } else {
+        match keg::lock::lock_formula(sweeper.cfg, name) {
+            Ok(lock) => Some(lock),
+            Err(e) => {
+                output::opoo(&e.to_string());
+                cleanup_formula_downloads(sweeper, index, name);
+                return;
+            }
+        }
+    };
+    for keg in eligible {
         let cfg = sweeper.cfg;
         let aliases = index
             .formula(&keg.name)

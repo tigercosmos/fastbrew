@@ -150,9 +150,9 @@ a pointer to the Homebrew installer.
 
 Order of operations for `fastbrew install a b c`:
 
-1. Auto-update check (section 9), then resolve each name (section 4.1, `resolve`).
-2. Build the dependency closure with `deps`: runtime deps only, honoring `uses_from_macos` bounds against the running macOS, skipping already-installed and up-to-date kegs. Detect `conflicts` against installed and linked kegs. Refuse `disabled` formulae; warn on `deprecated`. Refuse `pour_bottle_args` `only_if: :default_prefix` when the prefix is not the default.
-3. Take formula locks for everything in the plan (`var/homebrew/locks/<name>.formula.lock`, `flock`).
+1. Auto-update check (section 9), then resolve each name (section 4.1, `resolve`). The resolved `FormulaEntry` is what the rest of the pipeline works from: re-resolving the bare name would hand an explicitly tapped `user/repo/jq` back to core's `jq`, because the API loader runs before any tap loader.
+2. Build the dependency closure with `deps`, starting from each resolved entry and resolving every `depends_on` reference through `resolve` (core, the dependent's own tap, then any other installed tap; `user/repo/name` selects that tap). Runtime deps only, honoring `uses_from_macos` bounds against the running macOS, skipping already-installed and up-to-date kegs; a required dependency that resolves nowhere is `FormulaUnavailableError`, never a silent omission. The result is one deduplicated, dependency-ordered list in which a formula the user named stays a requested item even when another named formula depends on it. Detect `conflicts` against installed and linked kegs. Refuse `disabled` formulae; warn on `deprecated`. Refuse `pour_bottle_args` `only_if: :default_prefix` when the prefix is not the default. Planning is read-only: nothing under the prefix is written and no lock is taken, so `--dry-run` stops here.
+3. Take formula locks for everything in the plan (`var/homebrew/locks/<name>.formula.lock`, `flock`), including racks that are already installed and only need their receipt's `installed_on_request` flag set.
 4. Fetch all manifests concurrently, then all blobs concurrently (default 8 in flight, `HOMEBREW_DOWNLOAD_CONCURRENCY`). Verify blob sha256 against the API `bottle_checksum` while streaming. Reuse cached files.
 5. Extract in dependency order (parents after dependencies), each into a temporary directory under the rack, then rename into `Cellar/<name>/<version>`. Extraction of independent formulae runs in parallel.
 6. Write the receipt (`docs/COMPAT.md` section 3) merging the manifest's `sh.brew.tab` with install-time fields.
@@ -164,7 +164,7 @@ Order of operations for `fastbrew install a b c`:
 12. Run declarative `post_install_steps` (section 7) unless `--skip-post-install`.
 13. Update the receipt's `runtime_dependencies` from the final resolved graph and write it again.
 14. Print caveats and the summary line `🍺  <keg path>: <n> files, <size>`.
-15. Unless `HOMEBREW_NO_INSTALL_CLEANUP`, remove older kegs of the installed formulae (`cleanup` rules) and unreferenced cached bottles of those formulae.
+15. Release the formula locks, then, unless `HOMEBREW_NO_INSTALL_CLEANUP`, remove older kegs of the installed formulae (`cleanup` rules) and unreferenced cached bottles of those formulae. Cleanup takes the same locks per rack, so they have to be free by then.
 
 Every step that writes is idempotent and safe to retry; failure after step 5
 removes the partially installed keg unless the user passes `--keep-tmp`
