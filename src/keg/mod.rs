@@ -211,13 +211,35 @@ pub fn disk_usage_readable(bytes: u64) -> String {
 }
 
 /// Write `data` to `path` via a temp file in the same directory and rename.
+///
+/// `Pathname#atomic_write` keeps an existing file's mode and gives a new one
+/// `0666 & ~umask` (0644 for a normal umask); the temp file it is built from
+/// would otherwise be 0600, which would leave receipts unreadable to everyone
+/// but the installing user.
 pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
+    let existing_mode = std::fs::metadata(path).ok().map(|m| m.permissions().mode());
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     std::io::Write::write_all(&mut tmp, data)?;
+    let mode = existing_mode.unwrap_or(0o666 & !umask());
+    tmp.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(mode))?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// The process umask, read without changing it for longer than the call takes.
+fn umask() -> u32 {
+    // SAFETY: `umask` cannot fail; it is restored immediately. Two threads
+    // racing here would both end up restoring the same original value.
+    unsafe {
+        let current = libc::umask(0o022);
+        libc::umask(current);
+        current as u32
+    }
 }
 
 /// Create `dst` as a symlink to `src` expressed relative to `dst`'s directory
