@@ -420,9 +420,9 @@ fn a_tap_qualified_cask_is_the_one_that_is_installed() {
     );
 
     let plan = env.combined(&["install", "--cask", "--dry-run", "fixture/casks/rectangle"]);
-    assert!(
-        plan.contains("Would install cask fixture/casks/rectangle 99.0"),
-        "the plan follows the qualified token:\n{plan}"
+    assert_eq!(
+        plan, "==> Would install 1 cask:\nfixture/casks/rectangle\n",
+        "the plan follows the qualified token"
     );
 
     // ... and the install itself uses the tap's entry.

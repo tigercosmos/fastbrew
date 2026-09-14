@@ -387,10 +387,16 @@ and reinstalls the predecessor's artifacts (`#restore_backup`,
 `.upgrading` directory is a version in flight, not an installed one, and is
 skipped when discovering installed casks.
 
-`--dry-run` never writes: `install --cask` prints
-`Would install cask <token> <version>`, or `Would upgrade <token> <old> -> <new>`
-when the cask is installed and outdated; `upgrade --cask` prints
-`==> Would upgrade N outdated packages:` (`Cask::Upgrade.show_upgrade_summary`).
+`--dry-run` never writes. `install --cask` prints
+`==> Would install N cask(s):` followed by the full names of the casks that
+are *not* installed on one space-separated line, then
+`==> Would install N dependencies for <full name>:` per cask with an
+uninstalled dependency (`Install.print_dry_run_casks` with
+`include_installed: false`); an already-installed cask produces no output at
+all, even when it is outdated. `upgrade --cask` prints
+`==> Would upgrade N outdated packages:` (`Cask::Upgrade.show_upgrade_summary`)
+followed by `<full name> <old> -> <new>` per cask. `brew reinstall` has no
+`--dry-run` switch, so fastbrew's `reinstall --cask -n` wording is its own.
 Homebrew's `brew uninstall` has no `--dry-run` switch, so fastbrew's cask wording
 is its own: `==> Would uninstall Cask <token>`, `Would remove <kind> '<path>'`
 per artifact, then `==> Would purge files for version <version> of Cask <token>`

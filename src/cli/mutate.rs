@@ -89,6 +89,15 @@ pub struct InstallArgs {
     pub adopt: bool,
     #[arg(long)]
     pub skip_cask_deps: bool,
+    /// Require all casks to have a checksum.
+    #[arg(long)]
+    pub require_sha: bool,
+    /// Disable linking of a cask's helper executables.
+    #[arg(long)]
+    pub no_binaries: bool,
+    /// Enable linking of a cask's helper executables (the default).
+    #[arg(long, conflicts_with = "no_binaries")]
+    pub binaries: bool,
     #[arg(long, value_name = "path")]
     pub appdir: Option<String>,
     #[arg(long, value_name = "path")]
@@ -141,6 +150,16 @@ fn cask_options(ctx: &Ctx, args: &InstallArgs, reinstall: bool) -> CaskInstallOp
     if let Some(d) = &args.fontdir {
         explicit_dir_flags.push(format!("--fontdir={d}"));
     }
+    // `cask_options`: the switches come from the command line first, then
+    // from `HOMEBREW_CASK_OPTS`.
+    let env = &ctx.cfg.cask_opts;
+    let binaries = if args.binaries {
+        Some(true)
+    } else if args.no_binaries {
+        Some(false)
+    } else {
+        crate::cask::config::bool_flag(env, "binaries")
+    };
     CaskInstallOptions {
         force: args.force,
         adopt: args.adopt,
@@ -150,7 +169,9 @@ fn cask_options(ctx: &Ctx, args: &InstallArgs, reinstall: bool) -> CaskInstallOp
         verbose: ctx.verbose,
         reinstall,
         explicit_dir_flags,
-        skip_binaries: false,
+        skip_binaries: binaries == Some(false),
+        require_sha: args.require_sha
+            || crate::cask::config::bool_flag(env, "require-sha").unwrap_or(false),
         installed_as_dependency: false,
         zap: false,
         upgrade: false,

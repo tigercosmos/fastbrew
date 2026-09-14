@@ -33,6 +33,8 @@ pub struct CaskInstallOptions {
     pub explicit_dir_flags: Vec<String>,
     /// `--no-binaries`.
     pub skip_binaries: bool,
+    /// `--require-sha`: refuse a cask whose `sha256` is `:no_check`.
+    pub require_sha: bool,
     /// Installed to satisfy another cask or formula (`installed_on_request: false`).
     pub installed_as_dependency: bool,
     /// Reverse the artifacts with `zap` when replacing an installed version.
@@ -61,6 +63,9 @@ pub fn install_casks(
     casks: &[CaskEntry],
     opts: &CaskInstallOptions,
 ) -> Result<()> {
+    if opts.dry_run {
+        return print_dry_run(cfg, casks, opts);
+    }
     let mut failed: Vec<String> = Vec::new();
     for cask in casks {
         let _lock = crate::keg::lock::lock_cask(cfg, &cask.token)?;
@@ -78,6 +83,61 @@ pub fn install_casks(
             failed.join(", ")
         )))
     }
+}
+
+/// `Install.print_dry_run_casks(casks, include_installed: false)`: what
+/// `install --cask --dry-run` reports. An installed cask is left out
+/// entirely, and nothing is fetched or written.
+fn print_dry_run(cfg: &Config, casks: &[CaskEntry], opts: &CaskInstallOptions) -> Result<()> {
+    let pending: Vec<&CaskEntry> = casks
+        .iter()
+        .filter(|c| super::installed_cask(cfg, &c.token).is_none())
+        .collect();
+    if !pending.is_empty() {
+        output::ohai(&format!(
+            "Would install {}:",
+            output::plural(pending.len() as u64, "cask")
+        ));
+        println!(
+            "{}",
+            pending
+                .iter()
+                .map(|c| c.full_token())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+    for cask in casks {
+        let mut deps: Vec<String> = Vec::new();
+        if !opts.skip_cask_deps {
+            deps.extend(
+                cask.cask_dependencies()
+                    .into_iter()
+                    .filter(|token| super::installed_cask(cfg, token).is_none()),
+            );
+        }
+        deps.extend(
+            cask.formula_dependencies()
+                .into_iter()
+                .filter(|name| crate::keg::installed_kegs(cfg, name).is_empty()),
+        );
+        deps.dedup();
+        if deps.is_empty() {
+            continue;
+        }
+        output::ohai(&format!(
+            "Would install {} {} for {}:",
+            deps.len(),
+            if deps.len() == 1 {
+                "dependency"
+            } else {
+                "dependencies"
+            },
+            cask.full_token()
+        ));
+        println!("{}", deps.join(" "));
+    }
+    Ok(())
 }
 
 pub fn upgrade_casks(
@@ -226,6 +286,9 @@ pub fn install_cask_entry(
     opts: &CaskInstallOptions,
 ) -> Result<()> {
     prelude(cfg, cask)?;
+    if opts.require_sha && !opts.force {
+        verify_has_sha(cask)?;
+    }
 
     let installed = super::installed_cask(cfg, &cask.token);
     if let Some(installed) = &installed
@@ -544,6 +607,23 @@ impl Backup {
 }
 
 // ------------------------------------------------------------- checks
+
+/// `Cask::Download#verify_has_sha`: `--require-sha` refuses a cask that has
+/// no checksum to verify.
+pub fn verify_has_sha(cask: &CaskEntry) -> Result<()> {
+    let has_checksum = cask
+        .sha256
+        .as_deref()
+        .is_some_and(|s| !s.starts_with(':') && !s.is_empty());
+    if has_checksum {
+        return Ok(());
+    }
+    Err(Error::user(format!(
+        "Cask '{}' does not have a sha256 checksum defined.\nThis means you have the {} option set, perhaps in your `$HOMEBREW_CASK_OPTS`.",
+        cask.token,
+        output::green("--require-sha")
+    )))
+}
 
 /// `Cask::Installer#prelude`.
 pub fn prelude(cfg: &Config, cask: &CaskEntry) -> Result<()> {

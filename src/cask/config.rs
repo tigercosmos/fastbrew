@@ -38,6 +38,24 @@ pub const DEFAULT_DIRS: &[(&str, &str)] = &[
     ("screen_saverdir", "~/Library/Screen Savers"),
 ];
 
+/// A `--flag` / `--no-flag` switch as it appears in `HOMEBREW_CASK_OPTS` or
+/// on the command line (`Cask::Config` and `cask_options`). The last
+/// occurrence wins, and `None` means the layer said nothing.
+pub fn bool_flag(opts: &[String], name: &str) -> Option<bool> {
+    let on = format!("--{name}");
+    let off = format!("--no-{name}");
+    let mut value = None;
+    for token in opts {
+        let token = token.trim();
+        if token == on {
+            value = Some(true);
+        } else if token == off {
+            value = Some(false);
+        }
+    }
+    value
+}
+
 #[derive(Debug, Clone)]
 pub struct CaskDirs {
     pub appdir: PathBuf,
