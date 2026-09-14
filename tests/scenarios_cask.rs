@@ -126,6 +126,25 @@ impl Env {
         sha
     }
 
+    /// Write an executable `cmd/brew-<name>` into a tap that needs no clone:
+    /// every tap lookup fastbrew does is a directory walk.
+    fn write_tap_command(&self, tap: &str, name: &str, script: &str) -> PathBuf {
+        let (user, repo) = tap.split_once('/').expect("user/repo");
+        let dir = self
+            .sandbox
+            .prefix
+            .join("Library/Taps")
+            .join(user)
+            .join(format!("homebrew-{repo}"))
+            .join("cmd");
+        std::fs::create_dir_all(&dir).expect("mkdir cmd");
+        let path = dir.join(format!("brew-{name}"));
+        std::fs::write(&path, script).expect("write the command");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
     /// Install `version` of a fixture cask with a single `app` artifact.
     fn install_app_cask(&self, token: &str, app: &str, version: &str, extra: &str) {
         let url = fixture_url(token, version);
@@ -415,4 +434,75 @@ fn a_tap_qualified_cask_is_the_one_that_is_installed() {
     );
     assert!(!env.appdir().join(app).exists());
     assert_eq!(env.stdout(&["list", "--cask"]), "");
+}
+
+// ------------------------------------------------------------------ taps
+
+/// A tap's `cmd/brew-<name>` is an external command: `commands` lists it and
+/// `fastbrew <name>` runs it, the way `brew.rb` `exec`s `external_cmd_path`.
+#[test]
+fn a_taps_external_command_is_listed_and_executed() {
+    let env = env_or_skip!();
+    env.write_tap_command(
+        "tiger/cmds",
+        "greet",
+        "#!/bin/sh\necho \"greetings from $1 in $HOMEBREW_PREFIX\"\n",
+    );
+
+    let listed = env.stdout(&["commands"]);
+    assert!(
+        listed.contains("\n==> External commands\n"),
+        "the section is there:\n{listed}"
+    );
+    assert!(
+        listed.lines().any(|l| l == "greet"),
+        "the tap's command is listed:\n{listed}"
+    );
+
+    // `--quiet` drops the headers but keeps the command.
+    let quiet = env.stdout(&["commands", "--quiet"]);
+    assert!(quiet.lines().any(|l| l == "greet"), "{quiet}");
+
+    // Running it hands over the arguments and the resolved prefix.
+    let out = env.run(&["greet", "world"]);
+    assert!(
+        out.status.success(),
+        "the external command failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("greetings from world in {}", env.sandbox.prefix.display())
+    );
+
+    // Its exit status is the command's own.
+    env.write_tap_command("tiger/cmds", "boom", "#!/bin/sh\nexit 3\n");
+    assert_eq!(env.run(&["boom"]).status.code(), Some(3));
+
+    // A name no tap provides is still a candidate for delegation.
+    let out = env.run(&["definitely-not-a-command"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("refusing to delegate to brew"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ---------------------------------------------------------- general CLI
+
+/// `brew` with no arguments prints `HOMEBREW_HELP_MESSAGE` on stderr and
+/// exits 1; `help` prints the same text on stdout and exits 0.
+#[test]
+fn a_bare_invocation_prints_the_usage_summary_on_stderr() {
+    let env = env_or_skip!();
+    let out = env.run(&[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.starts_with("Example usage:\n"), "{stderr}");
+    assert!(stderr.contains("\nFurther help:\n"), "{stderr}");
+
+    let help = env.stdout(&["help"]);
+    assert_eq!(help, stderr);
 }

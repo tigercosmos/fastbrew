@@ -172,6 +172,13 @@ fn dispatch(argv: Vec<OsString>) -> Result<i32> {
         taps: OnceCell::new(),
     };
 
+    // `Homebrew::Help.help(empty_argv: true)`: a bare invocation prints the
+    // summary on stderr and exits 1, while `help` prints it on stdout.
+    if normalized.len() <= 1 {
+        eprint!("{}", misc::HELP_MESSAGE);
+        return Ok(1);
+    }
+
     // Pseudo-commands whose names start with `--` are handled before clap,
     // which would otherwise read them as flags of the root command.
     if let Some(name) = normalized.get(1).and_then(|a| a.to_str())

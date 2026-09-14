@@ -423,6 +423,49 @@ fn is_executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// `Commands.external_cmd_path`: `brew-<name>` on `PATH`, then in every
+/// installed tap's `cmd/` directory (`PATH.new(ENV["PATH"]).append(
+/// tap_cmd_directories)`).
+///
+/// A `brew-<name>.rb` is an *external Ruby* command, which Homebrew loads
+/// into its own process; that one still belongs to the Ruby `brew`.
+pub fn external_command_path(cfg: &Config, name: &str) -> Option<PathBuf> {
+    if name.contains('/') {
+        return None;
+    }
+    let file = format!("brew-{name}");
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join(&file);
+            if is_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    crate::tap::installed_taps(cfg)
+        .into_iter()
+        .map(|t| t.path(cfg).join("cmd").join(&file))
+        .find(|p| is_executable(p))
+}
+
+/// `brew.rb`'s `exec external_cmd_path.to_s, *ARGV`.
+///
+/// Homebrew's external commands read the prefix out of the environment
+/// `brew.sh` exports, so the resolved configuration is handed over the same
+/// way. Never returns on success.
+pub fn exec_external_command(cfg: &Config, path: &Path, args: &[std::ffi::OsString]) -> Error {
+    use std::os::unix::process::CommandExt;
+    let error = std::process::Command::new(path)
+        .args(args)
+        .env("HOMEBREW_PREFIX", &cfg.prefix)
+        .env("HOMEBREW_CELLAR", &cfg.cellar)
+        .env("HOMEBREW_REPOSITORY", &cfg.repository)
+        .env("HOMEBREW_LIBRARY", &cfg.library)
+        .env("HOMEBREW_CACHE", &cfg.cache)
+        .exec();
+    Error::user(format!("Failed to exec {}: {error}", path.display()))
+}
+
 pub fn commands(ctx: &Ctx, args: &CommandsArgs) -> Result<()> {
     let builtin: Vec<String> = BUILTIN_COMMANDS.iter().map(|s| s.to_string()).collect();
     let external = external_commands(&ctx.cfg);
@@ -713,20 +756,8 @@ pub fn shellenv(ctx: &Ctx, args: &ShellenvArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn help(ctx: &Ctx, args: &HelpArgs) -> Result<()> {
-    if let Some(command) = &args.command {
-        let normalized = super::resolve_alias(command);
-        let Some((_, usage)) = COMMAND_USAGE.iter().find(|(c, _)| *c == normalized) else {
-            return ctx.delegate(&format!("`help {command}` is not implemented by fastbrew"));
-        };
-        println!("Usage: {usage}");
-        if normalized != command {
-            println!("\n`{command}` is an alias for `{normalized}`.");
-        }
-        return Ok(());
-    }
-    println!(
-        "Example usage:
+/// `HOMEBREW_HELP_MESSAGE`: what `help`, and a bare invocation, print.
+pub const HELP_MESSAGE: &str = "Example usage:
   fastbrew search [TEXT|/REGEX/]
   fastbrew info [FORMULA|CASK...]
   fastbrew install FORMULA|CASK...
@@ -742,8 +773,22 @@ Troubleshooting:
 
 Further help:
   fastbrew commands
-  fastbrew help [COMMAND]"
-    );
+  fastbrew help [COMMAND]
+";
+
+pub fn help(ctx: &Ctx, args: &HelpArgs) -> Result<()> {
+    if let Some(command) = &args.command {
+        let normalized = super::resolve_alias(command);
+        let Some((_, usage)) = COMMAND_USAGE.iter().find(|(c, _)| *c == normalized) else {
+            return ctx.delegate(&format!("`help {command}` is not implemented by fastbrew"));
+        };
+        println!("Usage: {usage}");
+        if normalized != command {
+            println!("\n`{command}` is an alias for `{normalized}`.");
+        }
+        return Ok(());
+    }
+    print!("{HELP_MESSAGE}");
     Ok(())
 }
 
