@@ -126,6 +126,8 @@ fn keg_plist_path(keg_path: &Path, name: &str) -> Option<PathBuf> {
             return Some(p);
         }
     }
+    // A formula may name its service file itself (`service do name macos: ... end`),
+    // so fall back to any plist in the keg root that is really a launchd job.
     let mut extras: Vec<PathBuf> = std::fs::read_dir(keg_path)
         .ok()?
         .flatten()
@@ -133,7 +135,14 @@ fn keg_plist_path(keg_path: &Path, name: &str) -> Option<PathBuf> {
         .filter(|p| p.extension().is_some_and(|e| e == "plist") && p.is_file())
         .collect();
     extras.sort();
-    extras.into_iter().next()
+    extras.into_iter().find(|p| is_launchd_job(p))
+}
+
+/// A plist with both a `Label` and something to run is a launchd job.
+fn is_launchd_job(path: &Path) -> bool {
+    launchd::read_plist_dictionary(path).is_some_and(|d| {
+        d.contains_key("Label") && (d.contains_key("ProgramArguments") || d.contains_key("Program"))
+    })
 }
 
 /// Read the interesting keys out of an installed plist.
