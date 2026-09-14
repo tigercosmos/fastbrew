@@ -237,6 +237,48 @@ impl Config {
         self.prefix == Path::new(default)
     }
 
+    /// A configuration rooted at `root` for tests: `<root>/prefix`,
+    /// `<root>/cache`, `<root>/home` and so on, with every environment-derived
+    /// option at its default. Never reads the process environment, so unit
+    /// tests stay independent of the host.
+    #[doc(hidden)]
+    pub fn for_test(root: &Path) -> Config {
+        let prefix = root.join("prefix");
+        Config {
+            cellar: prefix.join("Cellar"),
+            repository: prefix.clone(),
+            library: prefix.join("Library"),
+            cache: root.join("cache"),
+            logs: root.join("logs"),
+            temp: root.join("tmp"),
+            home: root.join("home"),
+            prefix,
+            api_domain: DEFAULT_API_DOMAIN.to_string(),
+            bottle_domain: DEFAULT_BOTTLE_DOMAIN.to_string(),
+            artifact_domain: None,
+            github_packages_token: None,
+            github_packages_user: None,
+            no_auto_update: true,
+            auto_update_secs: 86_400,
+            api_auto_update_secs: 450,
+            no_install_cleanup: true,
+            no_install_upgrade: false,
+            no_installed_dependents_check: false,
+            no_emoji: false,
+            install_badge: "🍺".to_string(),
+            no_env_hints: true,
+            verbose: false,
+            debug: false,
+            download_concurrency: 8,
+            cleanup_max_age_days: 120,
+            curl_retries: 3,
+            cask_opts: vec![],
+            brew_path: None,
+            no_delegate: true,
+            require_sandbox: false,
+        }
+    }
+
     /// Replace Homebrew's API placeholders in a string.
     pub fn expand_placeholders(&self, s: &str) -> String {
         s.replace("$HOMEBREW_PREFIX", &self.prefix.to_string_lossy())
