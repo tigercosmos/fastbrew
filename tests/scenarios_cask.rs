@@ -1073,6 +1073,61 @@ fn a_binary_artifact_will_not_overwrite_an_existing_file() {
     assert!(!env.appdir().join(app).exists());
 }
 
+/// Writing the install records is part of the same transaction as the
+/// artifacts: a failure there purges the staged files and the version
+/// metadata, so the app has to come back out of the app directory with them.
+/// Otherwise the cask is installed as far as the user can see and not
+/// installed as far as every command can see.
+#[test]
+fn a_failed_receipt_write_takes_the_installed_app_back_out() {
+    let env = env_or_skip!();
+    let token = "fastbrew-receipt-fails";
+    let app = "FastbrewReceiptFails.app";
+    let url = fixture_url(token, "1.0");
+    let sha = env.seed_app_zip(&url, app, "1.0");
+    env.write_cask(token, &app_cask_rb(token, "1.0", &url, &sha, app, ""));
+
+    // A directory where the receipt belongs fails the last write of the
+    // install, with the app already moved into the app directory.
+    let blocker = env.caskroom(token).join(".metadata/INSTALL_RECEIPT.json");
+    std::fs::create_dir_all(&blocker).expect("block the receipt");
+
+    let out = env.run(&["install", "--cask", token]);
+    let report = support::strip_ansi(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ));
+    assert!(!out.status.success(), "the install must fail:\n{report}");
+    assert!(
+        !env.appdir().join(app).exists(),
+        "the app was left installed with no records:\n{report}"
+    );
+    assert!(
+        !env.caskroom(token).join("1.0").exists(),
+        "the staged version was left behind:\n{report}"
+    );
+    let out = env.run(&["uninstall", "--cask", token]);
+    assert!(
+        !out.status.success(),
+        "nothing was installed, so uninstall has nothing to do"
+    );
+
+    // Once the receipt can be written the same install works.
+    std::fs::remove_dir(&blocker).expect("unblock the receipt");
+    let out = env.run(&["install", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "the retry failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(env.appdir().join(app).is_dir());
+    assert_eq!(
+        env.stdout(&["list", "--cask", "--versions"]),
+        format!("{token} 1.0\n")
+    );
+}
+
 /// `--no-binaries` installs no `Artifact::Binary`, so the receipt must not
 /// record one either: an uninstall reverses what the receipt lists, and the
 /// target of a binary stanza (`bin/<generic name>`) is easy for something else

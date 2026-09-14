@@ -402,15 +402,21 @@ fn install_staged(
 
     artifacts::install_specs(cfg, dirs, &specs, ctx, opts.artifact_options())?;
 
-    metadata::write_config(cfg, dirs, &input.config_path, &opts.explicit_dir_flags)?;
-    metadata::write_receipt(&input)?;
-    if cask.is_latest() {
-        let _ = crate::keg::atomic_write(
-            &ctx.caskroom_path
-                .join(super::METADATA_SUBDIR)
-                .join("LATEST_DOWNLOAD_SHA256"),
-            super::download::file_sha256(download)?.as_bytes(),
-        );
+    // The records are part of the same transaction as the artifacts: the caller
+    // purges the staged files and the version metadata when this returns an
+    // error, so an app that is already in the app directory has to come back
+    // out first. Otherwise the install leaves a running app that nothing on
+    // disk says is installed, and `uninstall` reports it as not installed.
+    if let Err(error) = write_install_records(cfg, dirs, cask, opts, &input, download, ctx) {
+        if let Err(revert) =
+            artifacts::uninstall_specs(cfg, dirs, &specs, ctx, false, opts.artifact_options())
+        {
+            output::opoo(&format!(
+                "Reversing the artifacts of {} after a failed install also failed: {revert}",
+                cask.token
+            ));
+        }
+        return Err(error);
     }
 
     if let Some(caveats) = caveats(cfg, dirs, cask) {
@@ -418,6 +424,30 @@ fn install_staged(
         println!("{caveats}");
     }
     println!("{}", summary(cfg, cask, opts.upgrade));
+    Ok(())
+}
+
+/// `Cask::Installer#save_config_file`, `Cask::Tab#write` and
+/// `#save_download_sha`: everything that records the install on disk.
+fn write_install_records(
+    cfg: &Config,
+    dirs: &CaskDirs,
+    cask: &CaskEntry,
+    opts: &CaskInstallOptions,
+    input: &ReceiptInput<'_>,
+    download: &Path,
+    ctx: &CaskContext,
+) -> Result<()> {
+    metadata::write_config(cfg, dirs, &input.config_path, &opts.explicit_dir_flags)?;
+    metadata::write_receipt(input)?;
+    if cask.is_latest() {
+        crate::keg::atomic_write(
+            &ctx.caskroom_path
+                .join(super::METADATA_SUBDIR)
+                .join("LATEST_DOWNLOAD_SHA256"),
+            super::download::file_sha256(download)?.as_bytes(),
+        )?;
+    }
     Ok(())
 }
 
