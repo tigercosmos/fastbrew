@@ -352,6 +352,10 @@ Runtime: user services live in `~/Library/LaunchAgents/<label>.plist` (domain `g
 
 `services list` prints `Name Status User File` with statuses `none`, `started`, `scheduled`, `stopped`, `error N`, `unknown`, `other`; `--json` emits `[{"name","status","user","file","exit_code"}]`. Column widths (`subcommand/list.rb#print_table`): name is `max(names, 4)`, user is `max(users, 4)`, status is `max(coloured status lengths, 15)` and the *header* uses `status width - 9` to allow for the nine bytes of colour escapes in each row. With colour disabled the rows are therefore nine spaces wider than the header; that is Homebrew's output and fastbrew reproduces it. The `File` column is empty unless the service is loaded, and `$HOME` in it is shortened to `~`.
 
+With no service installed, `list` prints nothing at all and `list --json` prints `[]`; the hint ``No services available to control with `brew services` `` goes to stderr only when stderr is a terminal (`opoo ... if $stderr.tty?`), so a piped run is silent.
+
+`services info <formula>` builds a `FormulaWrapper` around any formula, so a formula that ships no service prints `<name> (sh.brew.<name>)` with every flag `false` instead of failing; only `start`/`stop`/`restart`/`run`/`kill` reject it with ``Formula `x` has not implemented #plist, #service or provided a locatable service file.`` An unknown name fails in `Formulary.factory` first: `No available formula with the name "x".` Subcommand aliases: `ls`; `i`; `launch`/`load`/`s`/`l`; `unload`/`terminate`/`term`/`t`/`u`; `relaunch`/`reload`/`r`; `k`; `clean`/`cl`/`rm`. Without `--all`, a missing name is ``Formula(e) missing, please provide a formula name or use `--all`.``
+
 ## 8. Version comparison
 
 Port of `Library/Homebrew/version.rb`. Tokenize with the alternation (in
@@ -399,6 +403,41 @@ in `From:` is `Formula/<first letter>/<name>.rb` (`Formula/lib/` for names
 starting with `lib`? No: Homebrew uses sharded dirs: names starting with
 `lib` go to `Formula/lib/`, otherwise `Formula/<first char>/`).
 
+`From:` is built by `Info#github_info`/`github_remote_path` from the *tap's
+configured remote* plus the file's path inside the tap: a remote matching
+`(https?://|git(@|://))github.com[:/](.+)/(.+?)(\.git)?` becomes
+`https://github.com/<user>/<repo>/blob/HEAD/<path>`, anything else is
+`<remote>/<path>`. A tap formula therefore links into its own repository, and
+its title is the full name (`==> user/repo/name: stable 1.2.3 (bottled)`)
+followed by a `Tap: user/repo` line after `From:`. `deps --tree` labels each
+root with its full name. A bare name carried by more than one installed tap
+is `TapFormulaAmbiguityError`:
+
+```
+Error: Formulae found in multiple taps:
+       * aaa/one/bottled
+       * bbb/two/bottled
+
+Please use the fully-qualified name (e.g. aaa/one/bottled) to refer to a specific formula.
+```
+
+A name that is both a formula and a cask resolves to the formula with
+``Warning: Treating x as a formula. For the cask, use homebrew/cask/x or
+specify the `--cask` flag. To silence this message, use the `--formula`
+flag.`` (`NamedArgs#package_conflicts_message`), suppressed by `-q`.
+
+`link` prints `Linking <keg path>... N symlinks created.`, `unlink` prints
+`Unlinking <keg path>... N symlinks removed.`, and `--dry-run` prints
+`Would link:`/`Would remove:` followed by the paths. An already linked keg is
+`Warning: Already linked: <keg path>` plus `To relink, run:\n  brew unlink
+<name> && brew link [--force ]<name>`. A keg-only formula that macOS provides
+is refused with `Warning: Refusing to link macOS provided/shadowed software:
+<name>` and the PATH hint; otherwise ``Warning: <name> is keg-only and must be
+linked with `--force`.`` A missing keg is `Error: No such keg: <cellar>/<name>`.
+`pin` on a formula that is not installed is `Error: <name> not installed` and
+exits 1 (`ofail`); `unpin` prints the same text with `onoe`, which leaves the
+exit status at 0.
+
 `list`: names in columns like `ls -C` on a TTY, one per line otherwise.
 `list --versions`: `name version [version ...]`. `outdated`: names; with
 `--verbose`: `name (installed) < current [pinned at x]`. Install progress:
@@ -414,6 +453,7 @@ starting with `lib`? No: Homebrew uses sharded dirs: names starting with
 `HOMEBREW_API_AUTO_UPDATE_SECS`, `HOMEBREW_NO_INSTALL_CLEANUP`,
 `HOMEBREW_NO_INSTALL_UPGRADE`, `HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK`,
 `HOMEBREW_NO_EMOJI`, `HOMEBREW_NO_COLOR`, `HOMEBREW_COLOR`, `NO_COLOR`,
+`HOMEBREW_AUTO_UPDATE_QUIET`,
 `HOMEBREW_NO_ENV_HINTS`, `HOMEBREW_VERBOSE`, `HOMEBREW_DEBUG`,
 `HOMEBREW_CASK_OPTS`, `HOMEBREW_DOWNLOAD_CONCURRENCY`,
 `HOMEBREW_CLEANUP_MAX_AGE_DAYS` (default 120), `HOMEBREW_CURL_RETRIES`,
@@ -432,3 +472,9 @@ path lies under `/opt/homebrew`, `/usr/local` or
 sandbox prefix is ever executed. `scripts/sandbox.sh` exports
 `FASTBREW_NO_DELEGATE=1`, or `FASTBREW_BREW=<sandbox prefix>/bin/brew` once
 `scripts/sandbox.sh brew` has cloned a Ruby Homebrew into the sandbox.
+
+`HOMEBREW_AUTO_UPDATE_SECS` has no fixed default: 300 when a command names a
+third-party tap package (`user/repo/name`), else 86400. `brew config` reports
+every `HOMEBREW_*`/`FASTBREW_*` variable the user set, boolean ones as `set`
+(`system_config.rb#homebrew_env_config`); fastbrew omits the `Clang`, `Git`
+and `Curl` lines, which Homebrew produces by shelling out.

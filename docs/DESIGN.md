@@ -101,8 +101,14 @@ parses JSON. Loading must cost under 5 ms; a full scan of all entries must
 cost under 15 ms. The implementation may use `rkyv` or a hand-rolled format;
 it must detect version mismatches and rebuild.
 
-Third-party taps: formula metadata comes from `rubylite` parsing of the tap's
-`.rb` files, cached per file mtime in the same index directory.
+Third-party taps: formula and cask metadata comes from `rubylite` parsing of
+the tap's `.rb` files, cached at
+`$HOMEBREW_CACHE/fastbrew/taps/<user>-<repo>.json` and keyed per file by its
+size and mtime plus the host bottle tag. A command re-parses only the files
+that changed; files `rubylite` cannot read are cached as failures with their
+reason so the command can delegate without parsing them again. Official taps
+are never read here: the API is their source of truth, exactly as
+`Formulary`'s `FromAPILoader` running before any tap loader.
 
 ### 4.2 Installed state
 
@@ -117,13 +123,23 @@ file names match Homebrew's so both tools share downloads.
 
 Native (first release), with Homebrew's flags where they matter:
 
-- Query: `info` (incl. `--json=v2`, `--cask`, `--installed`), `search` (name, `--desc`, `/regex/`, `--formula`, `--cask`), `desc`, `home`, `list` (`--versions`, `--pinned`, `--formula`, `--cask`, `--full-name`, `-1`, `--installed-on-request`, `--installed-as-dependency`, `--json`), `deps` (`--tree`, `--installed`, `--include-build`, `--include-test`, `--include-optional`, `-n`, `--for-each`, `--direct`), `uses` (`--installed`, `--recursive`), `leaves`, `outdated` (`--formula`, `--cask`, `--greedy`, `--json`, `-v`), `missing`, `options` (prints nothing for API formulae), `commands`, `config`, `--prefix [formula]`, `--cellar [formula]`, `--cache [formula]`, `--repository`, `--caskroom`, `--version`, `shellenv`, `which-formula`.
+- Query: `info` (incl. `--json=v2`, `--cask`, `--installed`), `search` (name, `--desc`, `/regex/`, `--formula`, `--cask`), `desc`, `home`, `list` (`--versions`, `--pinned`, `--formula`, `--cask`, `--full-name`, `-1`, `--installed-on-request`, `--installed-as-dependency`, `--json`), `deps` (`--tree`, `--installed`, `--include-build`, `--include-test`, `--include-optional`, `-n`, `--for-each`, `--direct`), `uses` (`--installed`, `--recursive`), `leaves`, `outdated` (`--formula`, `--cask`, `--greedy`, `--json`, `-v`), `missing`, `options` (prints nothing for API formulae), `commands`, `completions` (`link`, `unlink`, `state`), `help [command]`, `doctor` (the native subset below), `config`, `--prefix [formula]`, `--cellar [formula]`, `--cache [formula]`, `--repository`, `--caskroom`, `--taps`, `--version`, `shellenv`, `which-formula`.
+- Third-party taps: `info`, `search`, `deps`, `uses`, `outdated` and
+  `list --full-name` cover tap packages, by `user/repo/name` and by a bare
+  name that only an installed tap provides (`Formulary`'s `FromNameLoader`:
+  core first, then every installed tap, ambiguity listing the candidates).
 - Mutating: `install` (bottles; `--cask`; `--only-dependencies`; `--ignore-dependencies`; `--force`; `--dry-run`; `--overwrite`; `--skip-post-install`; `--quiet`; `--verbose`), `reinstall`, `upgrade` (all or named; `--cask`; `--greedy`; `--dry-run`), `uninstall`/`remove`/`rm` (`--force`, `--ignore-dependencies`, `--zap` for casks), `autoremove`, `cleanup` (`-n`, `--prune=days`, `-s`), `link`/`unlink` (`--overwrite`, `--force`, `-n`), `pin`/`unpin`, `postinstall`, `fetch`, `update` (`--auto-update`, `--quiet`), `tap`/`untap`/`tap-info`, `services` (`list`, `info`, `start`, `stop`, `restart`, `run`, `kill`, `cleanup`, `--json`).
 - Casks: `install --cask`, `uninstall --cask [--zap]`, `upgrade --cask`, `outdated --cask`, `info --cask`, `list --cask`, `reinstall --cask`, `fetch --cask`. Artifacts: `app`, `binary`, `manpage`, `bash_completion`, `zsh_completion`, `fish_completion`, `font`, `pkg`, `installer` (script), `suite`, `artifact`, `qlplugin`, `prefpane`, `screen_saver`, `service`, `input_method`, `dictionary`, `command_wrapper`, `uninstall` directives, `zap`, `preflight_steps`/`postflight_steps` (declarative). Containers: dmg, zip, tar.*, pkg, naked, nested.
 
+`doctor` runs a native subset (`check_for_broken_symlinks`,
+`check_for_unlinked_but_not_keg_only` and a fastbrew-specific
+`check_missing_opt_links`), lists them with `--list-checks`, and hands any
+other named check to `brew doctor`. Findings print Homebrew's preamble and
+exit 1; a clean prefix prints `Your system is ready to brew.`
+
 Delegated to `brew` (with a one-line notice on stderr):
 
-- `install --build-from-source`, `install --HEAD`, install of a formula with no bottle for this platform, install of a third-party tap formula whose metadata `rubylite` cannot extract, `postinstall` for a formula with a Ruby `post_install` (third-party taps), `bundle`, `doctor` (until a native subset exists), `test`, `edit`, `create`, `livecheck`, every `dev-cmd`, and any command fastbrew does not know.
+- `install --build-from-source`, `install --HEAD`, install of a formula with no bottle for this platform, install of a third-party tap formula whose metadata `rubylite` cannot extract, `postinstall` for a formula with a Ruby `post_install` (third-party taps), `bundle`, `test`, `edit`, `create`, `livecheck`, `--env` (it needs the full build environment), `link --cask`/`unlink --cask`, `pin --cask`/`unpin --cask`, every `dev-cmd`, and any command fastbrew does not know.
 
 If no `brew` is available the delegated command fails with an explanation and
 a pointer to the Homebrew installer.
@@ -215,17 +231,31 @@ cask as predecessor, then uninstall the old version.
    from the cached file's mtime (Homebrew uses `curl --time-cond`). On 304 the
    cache is fresh; touch its mtime. On 200 verify the JWS before replacing the
    file atomically, then rebuild the fast index.
-2. `git -C <tap> fetch` and fast-forward each third-party tap concurrently.
-3. Report: "Updated N taps", "==> New Formulae", "==> Updated Formulae",
-   "==> Renamed Formulae", "==> Deleted Formulae", the same for casks, and
-   "==> Outdated Formulae" (installed and now outdated), or "Already
-   up-to-date." Computed by diffing the old and new index.
+2. `git -C <tap> fetch` and fast-forward each third-party tap concurrently,
+   in parallel with step 1.
+3. Report, as `ReporterHub#dump` does in Homebrew 6:
+   `Updated N taps (user/repo, ...).` naming every tap whose `HEAD` moved
+   (plus `homebrew/core` and `homebrew/cask` when the API file changed), then
+   `==> New Formulae` (`name: description`, skipping installed ones),
+   `==> New Casks` (only when a cask is installed), `==> Deleted Installed
+   Formulae`, `==> Deleted Installed Casks`, `==> Outdated Formulae`,
+   `==> Outdated Casks` and the `You have N outdated formulae installed.`
+   summary. When nothing moved: `Already up-to-date.`; when something moved
+   but no package changed: `No changes to formulae or casks.` Homebrew 6 no
+   longer prints "Updated Formulae", "Renamed Formulae" or a plain "Deleted
+   Formulae" section, and fastbrew follows it.
 
-Auto-update runs before `install`, `upgrade`, `outdated` and `tap` unless
-`HOMEBREW_NO_AUTO_UPDATE` is set, when the cached API file is older than
-`HOMEBREW_AUTO_UPDATE_SECS` (default 86400) and the last check is older than
-`HOMEBREW_API_AUTO_UPDATE_SECS` (default 450). Output is suppressed unless
-`HOMEBREW_AUTO_UPDATE_QUIET` is unset and something changed.
+Auto-update runs before `install`, `upgrade`, `outdated` and `tap <name>`
+(never a bare `tap`) unless `HOMEBREW_NO_AUTO_UPDATE` is set, when the last
+check is older than `HOMEBREW_AUTO_UPDATE_SECS`. That default is 86400, or
+300 when a `user/repo/name` argument names a third-party tap, whose metadata
+the API does not carry (`utils/auto-update.sh`, `env_config.rb`). The
+auto-update itself accepts a cached API file younger than
+`HOMEBREW_API_AUTO_UPDATE_SECS` (default 450); an explicit `fastbrew update`
+always revalidates. The report is headed `==> Auto-updated Homebrew!`, is
+suppressed when `HOMEBREW_AUTO_UPDATE_QUIET` is set or nothing changed, and
+skips the outdated listing before a bare `upgrade`/`outdated`, which print it
+themselves.
 
 ## 10. Output and errors
 

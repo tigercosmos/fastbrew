@@ -379,15 +379,12 @@ pub struct WhichFormulaArgs {
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
-    /// Always do a slower, full update check.
+    /// Treat installed and updated formulae as if they are from the API.
     #[arg(short = 'f', long)]
     pub force: bool,
-    /// Run in the background as part of another command.
-    #[arg(long)]
+    /// Run in 'auto-update' mode (faster, less output).
+    #[arg(long, visible_alias = "preinstall")]
     pub auto_update: bool,
-    /// Print a verbose report.
-    #[arg(long)]
-    pub preinstall: bool,
 }
 
 #[derive(Args, Debug)]

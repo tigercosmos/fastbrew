@@ -201,3 +201,72 @@ fn cron_service_is_schedulable() {
 
     std::fs::remove_dir_all(cfg.cellar.join("cronny")).expect("cleanup");
 }
+
+// ---------------------------------------------------------------------------
+// The `services` command itself
+// ---------------------------------------------------------------------------
+
+#[test]
+fn services_command_prints_the_table_and_json() {
+    let Some(sandbox) = support::Sandbox::new() else {
+        eprintln!("no cached Homebrew API file available; skipping");
+        return;
+    };
+    // A private prefix with one installed formula that ships a service.
+    let cfg = Config::for_test(sandbox.prefix.parent().expect("sandbox root"));
+    let entry = foo_entry();
+    let keg = install_fake_keg(&cfg, &entry);
+
+    // `print_table`: the status column is 15 wide, its header 15 - 9, so
+    // without colour the rows trail nine spaces past the header.
+    let table = sandbox.stdout(&["services", "list"]);
+    assert_eq!(table, "Name Status User File\nfoo  none                 \n");
+    // `--verbose`/`-q` do not change the table.
+    assert_eq!(sandbox.stdout(&["services", "ls"]), table);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&sandbox.stdout(&["services", "list", "--json"])).expect("json");
+    assert_eq!(json[0]["name"], "foo");
+    assert_eq!(json[0]["status"], "none");
+    assert_eq!(
+        json[0]["file"],
+        keg.join("homebrew.mxcl.foo.plist")
+            .to_string_lossy()
+            .as_ref()
+    );
+
+    let info = strip_ansi(&sandbox.stdout(&["services", "info", "foo"]));
+    assert_eq!(
+        info,
+        "foo (homebrew.mxcl.foo)\nRunning: false\nLoaded: false\nSchedulable: false\n"
+    );
+    let verbose = strip_ansi(&sandbox.stdout(&["services", "info", "-v", "foo"]));
+    assert!(verbose.contains("Registered at login: false"), "{verbose}");
+    assert!(verbose.contains("Command: "), "{verbose}");
+
+    let all = sandbox.stdout(&["services", "info", "--all", "--json"]);
+    let all: serde_json::Value = serde_json::from_str(&all).expect("json");
+    assert_eq!(all[0]["name"], "foo");
+    assert_eq!(all[0]["service_name"], "homebrew.mxcl.foo");
+
+    // `services info` for a formula without a service reports every flag
+    // false rather than failing, like `FormulaWrapper#to_hash`.
+    sandbox.add_keg("jq", "1.8.2", true);
+    let info = strip_ansi(&sandbox.stdout(&["services", "info", "jq"]));
+    assert_eq!(
+        info,
+        "jq (sh.brew.jq)\nRunning: false\nLoaded: false\nSchedulable: false\n"
+    );
+
+    // `start` on a formula without a service is Homebrew's wording.
+    let out = sandbox.run(&["services", "start", "jq"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim(),
+        "Error: Formula `jq` has not implemented #plist, #service or provided a locatable service file."
+    );
+
+    // `cleanup` has nothing to do in a fresh prefix.
+    let out = sandbox.stdout(&["services", "cleanup"]);
+    assert_eq!(out.trim(), "All user-space services OK, nothing cleaned...");
+}
