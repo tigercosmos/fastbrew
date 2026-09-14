@@ -329,6 +329,15 @@ pub fn dependents_message(required: &[Keg], dependents: &[String], named: &[Stri
 
 // ------------------------------------------------------------- autoremove
 
+/// `Utils.pluralize("formula", n)` without the count, which the autoremove
+/// heading prints itself.
+fn formulae(count: usize) -> String {
+    pluralize("formula", count)
+        .split_once(' ')
+        .map(|(_, stem)| stem.to_string())
+        .unwrap_or_default()
+}
+
 /// `Cleanup.autoremove`.
 pub fn autoremove(cfg: &Config, index: &Index, dry_run: bool) -> Result<()> {
     let mut removable: Vec<String> = deps::removable(cfg, index)?.into_iter().collect();
@@ -354,11 +363,7 @@ pub fn autoremove(cfg: &Config, index: &Index, dry_run: bool) -> Result<()> {
     output::ohai(&format!(
         "{verb} {} unneeded {}:",
         removable.len(),
-        if removable.len() == 1 {
-            "formula"
-        } else {
-            "formulae"
-        }
+        formulae(removable.len())
     ));
     println!("{}", removable.join("\n"));
     if dry_run {
@@ -374,12 +379,6 @@ pub fn autoremove(cfg: &Config, index: &Index, dry_run: bool) -> Result<()> {
             dry_run: false,
         },
     )
-}
-
-/// `Utils.pluralize("formula", n)` for the autoremove heading.
-#[allow(dead_code)]
-fn formulae(count: usize) -> String {
-    pluralize("formula", count)
 }
 
 #[cfg(test)]
