@@ -49,7 +49,12 @@ impl fmt::Display for Error {
                 };
                 write!(f, "No available {what} with the name \"{name}\".")?;
                 if !suggestions.is_empty() {
-                    write!(f, " Did you mean {}?", suggestions.join(", "))?;
+                    // `Utils::Text.to_sentence(..., conjunction: "or")`.
+                    write!(
+                        f,
+                        " Did you mean {}?",
+                        crate::resolve::to_sentence(suggestions, "or")
+                    )?;
                 }
                 Ok(())
             }
