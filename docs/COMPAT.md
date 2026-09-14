@@ -248,20 +248,49 @@ Caskroom: `$PREFIX/Caskroom/<token>/<version>/` (staged files, with symlinks to 
 Cask receipt (`INSTALL_RECEIPT.json`):
 
 ```json
-{"homebrew_version": "6.0.22", "loaded_from_api": true, "uninstall_flight_blocks": false, "installed_as_dependency": false, "installed_on_request": true, "time": 1757439542, "runtime_dependencies": {}, "source": {"tap": "homebrew/cask", "tap_git_head": "<sha>", "version": "1.1.3", "path": "<api file path>"}, "arch": "arm64", "uninstall_artifacts": [{"app": ["Ghostty.app"]}, {"binary": ["/Applications/Ghostty.app/Contents/MacOS/ghostty"]}, {"zap": [{"trash": [..]}]}], "built_on": {..}}
+{"homebrew_version": "6.0.22", "loaded_from_api": true, "loaded_from_internal_api": true, "uninstall_flight_blocks": false, "installed_on_request": true, "time": 1757439542, "runtime_dependencies": {}, "source": {"tap": "homebrew/cask", "tap_git_head": "<sha>", "version": "1.1.3", "path": "<api file path>"}, "arch": "arm64", "uninstall_artifacts": [{"app": ["Ghostty.app"]}, {"binary": ["/Applications/Ghostty.app/Contents/MacOS/ghostty"]}, {"zap": [{"trash": [..]}]}], "built_on": {..}}
 ```
 
-`uninstall_artifacts` lists artifacts in v2 JSON form with resolved paths.
+`Cask::Tab#to_json` writes exactly these keys, in this order. Receipts from
+Homebrew 4.x carry `installed_as_dependency` and no `loaded_from_internal_api`;
+read both shapes, write the current one. `uninstall_artifacts` lists the
+artifacts that have an uninstall phase (plus `zap`) in v2 JSON form, with
+`$APPDIR`/`$HOMEBREW_PREFIX`/`$HOME` resolved but `~` left alone, and blank
+arguments dropped. `pkg`, `installer` and `generated_script` have no uninstall
+phase and are not listed.
 
-`config.json`: `{"default": {"languages": [..], "appdir": "/Applications", "keyboard_layoutdir": "/Library/Keyboard Layouts", "colorpickerdir": "~/Library/ColorPickers", "prefpanedir": "~/Library/PreferencePanes", "qlplugindir": "~/Library/QuickLook", "mdimporterdir": "~/Library/Spotlight", "dictionarydir": "~/Library/Dictionaries", "fontdir": "~/Library/Fonts", "servicedir": "~/Library/Services", "input_methoddir": "~/Library/Input Methods", "internet_plugindir": "~/Library/Internet Plug-Ins", "audio_unit_plugindir": "~/Library/Audio/Plug-Ins/Components", "vst_plugindir": "~/Library/Audio/Plug-Ins/VST", "vst3_plugindir": "~/Library/Audio/Plug-Ins/VST3", "screen_saverdir": "~/Library/Screen Savers"}, "env": {..from HOMEBREW_CASK_OPTS..}, "explicit": {..from flags..}}` with `~` expanded. `binarydir` is `$PREFIX/bin`, `manpagedir` is `$PREFIX/share/man`, completions go to `$PREFIX/etc/bash_completion.d`, `$PREFIX/share/zsh/site-functions`, `$PREFIX/share/fish/vendor_completions.d`.
+`config.json`: `{"default": {"languages": [..], "appdir": "/Applications", "appimagedir": "~/Applications", "keyboard_layoutdir": "/Library/Keyboard Layouts", "colorpickerdir": "~/Library/ColorPickers", "prefpanedir": "~/Library/PreferencePanes", "qlplugindir": "~/Library/QuickLook", "mdimporterdir": "~/Library/Spotlight", "dictionarydir": "~/Library/Dictionaries", "fontdir": "~/Library/Fonts", "servicedir": "~/Library/Services", "input_methoddir": "~/Library/Input Methods", "internet_plugindir": "~/Library/Internet Plug-Ins", "audio_unit_plugindir": "~/Library/Audio/Plug-Ins/Components", "vst_plugindir": "~/Library/Audio/Plug-Ins/VST", "vst3_plugindir": "~/Library/Audio/Plug-Ins/VST3", "screen_saverdir": "~/Library/Screen Savers"}, "env": {..from HOMEBREW_CASK_OPTS..}, "explicit": {..from flags..}}` with `~` expanded. `binarydir` is `$PREFIX/bin`, `manpagedir` is `$PREFIX/share/man`, completions go to `$PREFIX/etc/bash_completion.d`, `$PREFIX/share/zsh/site-functions`, `$PREFIX/share/fish/vendor_completions.d`.
 
-DMG: `hdiutil attach -plist -nobrowse -readonly -mountrandom <tmpdir> <dmg>` with stdin `qn\n` (declines EULA prompts); on failure convert with `hdiutil convert -format UDTO -o <x.cdr>` and attach that. Parse the plist `system-entities[].mount-point`. Copy contents with `ditto` (excluding `.Trashes`, `.fseventsd`, `.DS_Store`, `.background`, `.VolumeIcon.icns`, `.MobileBackups`), `chmod u+w`, then `hdiutil detach -force`. ZIP: `ditto -x -k --sequesterRsrc <zip> <dir>` (or `unzip`). Fonts are moved (not copied) into `fontdir`. App move: if the target exists and `--force` is absent, abort with `It seems there is already an App at '<target>'.`; `--adopt` accepts an identical existing app.
+`languages` defaults to `defaults read -g AppleLanguages`. Keys come from
+`Cask::Config::DEFAULT_DIRS` in that order; `env` and `explicit` hold only the
+keys their layer set, parsed from `--appdir=`-style arguments (hyphens become
+underscores, `--language=a,b` becomes the `languages` array).
 
-Quarantine: read `com.apple.quarantine` from the download (`xattr -p`); if
-present, write `<flags>;<hex time>;Homebrew;<uuid>` variants exactly as
-`Library/Homebrew/cask/quarantine.rb` does (set the no-translocation bit
-`0x0040`? read the Ruby: it toggles bit 8 of the flags to disable
-translocation) onto every staged file with `xattr -w`.
+Downloads are shared with Homebrew: the file is
+`$CACHE/downloads/<sha256 of the url>--<basename>` (partial: `.incomplete`) and
+the symlink is `$CACHE/Cask/<token>--<version><ext>` pointing at it. The
+basename comes from `Content-Disposition` when the server sends one, else from
+the resolved URL. A checksum mismatch deletes the file and aborts with
+`SHA-256 mismatch` / `Expected:` / `  Actual:` / `    File:`.
+
+DMG: `hdiutil attach -plist -nobrowse -readonly -mountrandom <tmpdir> <dmg>` with stdin `qn\n` (declines EULA prompts); on failure convert with `hdiutil convert -format UDTO -o <x.cdr>` and attach that. Parse the plist `system-entities[].mount-point`. Copy contents with `ditto`, excluding `UnpackStrategy::Dmg::Bom::DMG_METADATA` (`.background`, `.com.apple.timemachine.donotpresent`, `.com.apple.timemachine.supported`, `.DocumentRevisions-V100`, `.DS_Store`, `.fseventsd`, `.MobileBackups`, `.Spotlight-V100`, `.TemporaryItems`, `.Trashes`, `.VolumeIcon.icns`, `.HFS+ Private Directory Data\r`, `.HFS+ Private Data\r`) and aliases to system directories such as `/Applications`, then `chmod u+w` and `hdiutil detach -force`. ZIP: `ditto -x -k --sequesterRsrc <zip> <dir>` (or `unzip`). Fonts are moved (not copied) into `fontdir`. App move: if the target exists and `--force` is absent, abort with `It seems there is already an App at '<target>'.`; `--adopt` accepts an identical existing app.
+
+Quarantine (`Library/Homebrew/cask/quarantine.rb`): read `com.apple.quarantine`
+from the download (`xattr -p`). When it is present, `Quarantine.propagate`
+writes it onto every path under the staged directory (the directory itself
+excluded, symlinks skipped, each made `u+w` first) after
+`toggle_no_translocation_bit` ORs `0x0100` into the first `;`-separated field
+and left-pads that field with zeroes to at least four hex digits
+(`0083;...` becomes `0183;...`). Bit `0x0040` is the separate user-approval
+flag that upgrades inherit; fastbrew does not set it.
+
+Uninstall directives run in `AbstractUninstall::ORDERED_DIRECTIVES` order:
+`early_script`, `launchctl`, `quit`, `signal`, `login_item`, `kext`, `script`,
+`pkgutil`, `delete`, `trash`, `rmdir`. `uninstall` runs all but `rmdir`, then
+`rmdir` in a post phase; `zap` runs all of them. `quit` is skipped unless the
+application is already running, otherwise AppleScript would launch it. macOS
+Homebrew trashes through `NSFileManager#trashItemAtURL`; fastbrew moves the
+path into `~/.Trash`, uniquifying the name.
 
 ## 7. Services
 
