@@ -130,11 +130,17 @@ pub fn link_with_aliases(
     let record = cfg.linked_record(&keg.name);
     if record.is_dir() {
         let resolved = std::fs::canonicalize(&record).unwrap_or(record);
-        return Err(Error::user(format!(
-            "Cannot link {}\nAnother version is already linked: {}",
-            keg.name,
-            resolved.display()
-        )));
+        // A record that already names this very keg is a leftover of an
+        // interrupted link (or a repeated `link`): relinking it is idempotent,
+        // since identical symlinks are skipped, so only another keg blocks.
+        let same_keg = std::fs::canonicalize(&keg.path).ok().as_deref() == Some(resolved.as_path());
+        if !same_keg {
+            return Err(Error::user(format!(
+                "Cannot link {}\nAnother version is already linked: {}",
+                keg.name,
+                resolved.display()
+            )));
+        }
     }
 
     if !opts.dry_run {

@@ -2245,3 +2245,39 @@ fn a_keg_whose_finishing_failed_is_not_installed() {
     );
     assert!(sb.prefix.join("bin/fbfinishfail").is_symlink());
 }
+
+/// A run killed while linking leaves the prefix symlinks and the
+/// `var/homebrew/linked` record pointing at a keg path; when that keg is
+/// poured again at the same path, the leftovers name the new keg and must
+/// not block the install (deterministic twin of the kill test above).
+#[test]
+fn leftover_links_from_a_killed_run_do_not_block_a_fresh_install() {
+    let sb = sandbox_or_skip!();
+    network_or_skip!();
+
+    ok(&sb, &["install", "hello"]);
+    let version = api_pkg_version("hello");
+    assert!(sb.prefix.join("var/homebrew/linked/hello").is_symlink());
+
+    // Simulate the crash: the keg is gone, every link into it stays.
+    std::fs::remove_dir_all(sb.prefix.join("Cellar/hello")).expect("remove the rack");
+    assert!(sb.prefix.join("bin/hello").is_symlink());
+    assert!(!sb.prefix.join("bin/hello").exists(), "dangling now");
+
+    let out = ok(&sb, &["install", "hello"]);
+    assert!(
+        !out.contains("did not complete successfully"),
+        "the link step must succeed: {out}"
+    );
+    assert!(
+        keg(&sb, "hello", &version)
+            .join("INSTALL_RECEIPT.json")
+            .is_file()
+    );
+    assert!(sb.prefix.join("bin/hello").exists());
+    assert!(sb.prefix.join("var/homebrew/linked/hello").is_symlink());
+    assert_eq!(
+        ok(&sb, &["list", "--versions", "hello"]).trim(),
+        format!("hello {version}")
+    );
+}
