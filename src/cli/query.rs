@@ -265,11 +265,10 @@ pub fn print_formula_info(ctx: &Ctx, formula: &FormulaEntry) -> Result<()> {
         }
         for k in &kegs {
             let (files, bytes) = k.disk_usage();
-            let star = if k.is_linked(cfg) || k.is_optlinked(cfg) {
-                " *"
-            } else {
-                ""
-            };
+            // `Keg#linked?` alone decides the marker: an opt record is kept
+            // for keg-only formulae and for any unlinked keg, so it says
+            // nothing about linkage (`cmd/info.rb`).
+            let star = if k.is_linked(cfg) { " *" } else { "" };
             println!("{} ({}){star}", k.path.display(), fmt::abv(files, bytes));
             if let Ok(receipt) = k.receipt() {
                 println!("  {}", fmt::tab_line(&receipt));
