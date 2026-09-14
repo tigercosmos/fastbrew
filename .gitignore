@@ -1,3 +1,4 @@
 /target
 *.fbi
 .DS_Store
+/.claude/
