@@ -423,15 +423,22 @@ pub fn print_cask_info(ctx: &Ctx, cask: &CaskEntry) {
         let appdir = cask_appdir(cfg);
         output::ohai("Artifacts");
         for a in shown {
-            let summary = a
-                .args
+            // `Relocated#summarize`: `<source> -> <target>`, with the target
+            // left exactly as the cask spells it.
+            let args = crate::cask::artifacts::spread(&a.args);
+            let summary = args
                 .first()
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
                 .and_then(Value::as_str)
                 .map(|s| s.replace("$APPDIR", &appdir))
                 .unwrap_or_else(|| a.kind.clone());
-            println!("{summary} ({})", english_name(&a.kind));
+            let target = args
+                .iter()
+                .filter_map(Value::as_object)
+                .find_map(|m| m.get(":target").or_else(|| m.get("target")))
+                .and_then(Value::as_str)
+                .map(|t| format!(" -> {t}"))
+                .unwrap_or_default();
+            println!("{summary}{target} ({})", english_name(&a.kind));
         }
     }
     if let Some(caveats) = cask.caveats_text() {
