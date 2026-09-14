@@ -159,6 +159,14 @@ pub fn outdated_formulae(
 
 /// Version staged in `Caskroom/<token>` (the newest non-dot subdirectory).
 pub fn installed_cask_version(cfg: &Config, token: &str) -> Option<String> {
+    // Homebrew derives the installed version from the metadata caskfile
+    // (`Caskroom.cask_installed_version`); `cask::installed_cask` does the
+    // same and ignores `<version>.upgrading` rollback backups.
+    if let Some(installed) = crate::cask::installed_cask(cfg, token) {
+        return Some(installed.version);
+    }
+    // Fallback for a Caskroom without metadata: the newest staged version
+    // directory, never an upgrade backup.
     let dir = cfg.caskroom().join(token);
     let mut versions: Vec<(std::time::SystemTime, String)> = std::fs::read_dir(&dir)
         .ok()?
@@ -166,7 +174,7 @@ pub fn installed_cask_version(cfg: &Config, token: &str) -> Option<String> {
         .filter(|e| e.path().is_dir())
         .filter_map(|e| {
             let name = e.file_name().to_str()?.to_string();
-            if name.starts_with('.') {
+            if name.starts_with('.') || name.ends_with(crate::cask::BACKUP_SUFFIX) {
                 return None;
             }
             let mtime = e
