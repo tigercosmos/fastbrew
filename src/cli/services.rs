@@ -26,8 +26,9 @@ pub struct ServicesArgs {
     #[arg(long)]
     pub json: bool,
     /// When run as root on macOS, run the service(s) as this user.
-    #[arg(long, value_name = "user", num_args = 0..=1,
-          require_equals = true, default_missing_value = "")]
+    // `cmd/services.rb` declares `flag "--sudo-service-user="`, so the value
+    // is required: a bare `--sudo-service-user` is a usage error.
+    #[arg(long, value_name = "user", require_equals = true)]
     pub sudo_service_user: Option<String>,
     /// Use the service file at this location (`start`, `run`, `restart`).
     #[arg(long, value_name = "path")]
@@ -74,7 +75,24 @@ pub fn services(ctx: &Ctx, args: &ServicesArgs) -> Result<()> {
             }
         },
     };
-    let sudo = args.sudo_service_user.is_some();
+    // `Subcommand.dispatch`: the flag is only usable as root, and only on
+    // macOS, where launchd has a system domain to put the service in.
+    let sudo_user = match args.sudo_service_user.as_deref() {
+        None => None,
+        Some(user) if user.trim().is_empty() => {
+            return Err(Error::user(
+                "Invalid usage: `fastbrew services --sudo-service-user` requires a username.",
+            ));
+        }
+        Some(user) => {
+            if !services::launchd::is_root() {
+                return Err(Error::user(
+                    "`fastbrew services --sudo-service-user` is supported only when running as root!",
+                ));
+            }
+            Some(user)
+        }
+    };
 
     // Flags whose semantics fastbrew does not implement would change what the
     // command does, so they go to the Ruby `brew` rather than being ignored.
@@ -95,7 +113,7 @@ pub fn services(ctx: &Ctx, args: &ServicesArgs) -> Result<()> {
         "list" => list(ctx, args),
         "info" => info(ctx, args, &names),
         "cleanup" => services::cleanup(&ctx.cfg),
-        _ => act(ctx, args, sub, &names, sudo),
+        _ => act(ctx, args, sub, &names, sudo_user),
     }
 }
 
@@ -156,7 +174,13 @@ fn check(names: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn act(ctx: &Ctx, args: &ServicesArgs, sub: &str, names: &[String], sudo: bool) -> Result<()> {
+fn act(
+    ctx: &Ctx,
+    args: &ServicesArgs,
+    sub: &str,
+    names: &[String],
+    sudo_user: services::SudoUser<'_>,
+) -> Result<()> {
     let targets: Vec<String> = if args.all {
         // `targets`: `start` only touches what is not loaded, `stop` only
         // what is.
@@ -165,13 +189,20 @@ fn act(ctx: &Ctx, args: &ServicesArgs, sub: &str, names: &[String], sudo: bool) 
             "stop" => Some(true),
             _ => None,
         };
-        services::available_services(&ctx.cfg, loaded, !sudo)
+        services::available_services(&ctx.cfg, loaded, sudo_user.is_none())
             .into_iter()
             .map(|s| s.name)
             .collect()
     } else {
         check(names)?;
-        names.to_vec()
+        // `Cli.targets` builds a `FormulaWrapper` around `Formulary.factory`,
+        // so an unknown name fails in resolution, not with "not installed".
+        let index = ctx.index()?;
+        let mut resolved = Vec::with_capacity(names.len());
+        for name in names {
+            resolved.push(resolve::resolve_formula(&ctx.cfg, index, name)?.name);
+        }
+        resolved
     };
 
     let action = match sub {
@@ -185,7 +216,7 @@ fn act(ctx: &Ctx, args: &ServicesArgs, sub: &str, names: &[String], sudo: bool) 
         }
     };
     for name in &targets {
-        action(&ctx.cfg, name, sudo)?;
+        action(&ctx.cfg, name, sudo_user)?;
     }
     Ok(())
 }

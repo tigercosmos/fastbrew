@@ -628,6 +628,186 @@ fn update_fails_when_a_taps_remote_cannot_be_fetched() {
     );
 }
 
+// -------------------------------------------------------------- services
+
+/// A keg that ships a service: the generated plist and systemd unit plus the
+/// receipt `services list` reads. Nothing here ever talks to launchd.
+fn install_service_keg(env: &Env, name: &str, version: &str) -> PathBuf {
+    let entry: fastbrew::model::FormulaEntry = serde_json::from_value(serde_json::json!({
+        "desc": "Scenario service",
+        "homepage": "https://example.invalid/svc",
+        "stable_version": version,
+        "service_run_args": [[
+            "$HOMEBREW_PREFIX/opt/scenario-svc/bin/scenario-svc",
+            "--config",
+            "$HOMEBREW_PREFIX/etc/scenario-svc.conf"
+        ]],
+        "service_args": [
+            [":run_type", ":immediate"],
+            [":working_dir", "$HOMEBREW_PREFIX"],
+            [":log_path", "$HOMEBREW_PREFIX/var/log/scenario-svc.log"],
+            [":keep_alive", {":always": true}]
+        ]
+    }))
+    .expect("entry");
+    let mut entry = entry;
+    entry.name = name.to_string();
+    entry.tap = "homebrew/core".to_string();
+
+    let keg = env.sandbox.prefix.join("Cellar").join(name).join(version);
+    std::fs::create_dir_all(keg.join("bin")).expect("mkdir keg");
+    std::fs::write(
+        keg.join("INSTALL_RECEIPT.json"),
+        serde_json::json!({
+            "homebrew_version": fastbrew::HOMEBREW_COMPAT_VERSION,
+            "installed_on_request": true,
+            "runtime_dependencies": [],
+            "source": {"tap": "homebrew/core", "versions": {"stable": version}},
+        })
+        .to_string(),
+    )
+    .expect("write receipt");
+    fastbrew::services::plist::install_service_files(&env.config(), &entry, &keg)
+        .expect("install service files");
+    keg
+}
+
+/// A formula with a service is discoverable, reported as `none`, and gone
+/// again once the keg is: the whole read-only half of `brew services`.
+#[test]
+fn a_services_keg_is_listed_until_it_is_uninstalled() {
+    let env = env_or_skip!();
+    let name = "scenario-svc";
+    let keg = install_service_keg(&env, name, "1.0");
+
+    // The keg carries both generated files, under the legacy plist label.
+    let plist = keg.join(format!("homebrew.mxcl.{name}.plist"));
+    assert!(plist.is_file(), "{} missing", plist.display());
+    assert!(keg.join(format!("homebrew.{name}.service")).is_file());
+
+    // `print_table`: the status column is 15 wide, the header 15 - 9.
+    let table = env.stdout(&["services", "list"]);
+    assert_eq!(
+        table,
+        "Name         Status User File\nscenario-svc none                 \n"
+    );
+    assert_eq!(env.stdout(&["services", "ls"]), table);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&env.stdout(&["services", "list", "--json"])).expect("json");
+    assert_eq!(json[0]["name"], serde_json::json!(name));
+    assert_eq!(json[0]["status"], serde_json::json!("none"));
+    assert_eq!(json[0]["user"], serde_json::Value::Null);
+    assert_eq!(json[0]["exit_code"], serde_json::Value::Null);
+    assert_eq!(
+        json[0]["file"],
+        serde_json::json!(plist.to_string_lossy().as_ref())
+    );
+
+    let info = env.stdout(&["services", "info", name]);
+    assert_eq!(
+        info,
+        format!(
+            "{name} (homebrew.mxcl.{name})\nRunning: false\nLoaded: false\nSchedulable: false\n"
+        )
+    );
+    let info_json: serde_json::Value =
+        serde_json::from_str(&env.stdout(&["services", "info", "--json", name])).expect("json");
+    assert_eq!(
+        info_json[0]["service_name"],
+        serde_json::json!(format!("homebrew.mxcl.{name}"))
+    );
+    assert_eq!(info_json[0]["loaded"], serde_json::json!(false));
+
+    // A formula without a service still answers `info`, with every flag false
+    // (`FormulaWrapper#to_hash`), but cannot be started.
+    env.sandbox
+        .add_keg("jq", &support::api_pkg_version("jq"), true);
+    assert_eq!(
+        env.stdout(&["services", "info", "jq"]),
+        "jq (sh.brew.jq)\nRunning: false\nLoaded: false\nSchedulable: false\n"
+    );
+    let out = env.run(&["services", "start", "jq"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)).trim(),
+        "Error: Formula `jq` has not implemented #plist, #service or provided a locatable service file."
+    );
+
+    // A formula that is not installed at all fails in name resolution.
+    let out = env.run(&["services", "start", "definitely-not-a-formula"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("No available formula with the name"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Uninstalling the keg takes the service with it.
+    std::fs::remove_dir_all(env.sandbox.prefix.join("Cellar").join(name)).expect("remove the keg");
+    assert_eq!(env.stdout(&["services", "list"]), "");
+    assert_eq!(env.stdout(&["services", "list", "--json"]).trim(), "[]");
+    assert_eq!(
+        env.stdout(&["services", "cleanup"]).trim(),
+        "All user-space services OK, nothing cleaned..."
+    );
+}
+
+/// `--sudo-service-user` names the user the service runs as, so it needs a
+/// value and root (`Subcommand.dispatch`). Nothing about it may be guessed:
+/// a missing username used to leave the plist untouched and the service
+/// running as root.
+#[test]
+fn sudo_service_user_needs_a_username_and_root() {
+    let env = env_or_skip!();
+    install_service_keg(&env, "scenario-svc", "1.0");
+
+    // `flag "--sudo-service-user="`: the value is not optional.
+    let out = env.run(&["services", "start", "--sudo-service-user", "scenario-svc"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("equal sign is needed"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // An empty value is a usage error rather than "run as nobody in
+    // particular".
+    let out = env.run(&["services", "start", "--sudo-service-user=", "scenario-svc"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("requires a username"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The tests never run as root, which is exactly the case Homebrew
+    // refuses: nothing is copied and nothing is bootstrapped.
+    let out = env.run(&[
+        "services",
+        "start",
+        "--sudo-service-user=nobody",
+        "scenario-svc",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)).trim(),
+        "Error: `fastbrew services --sudo-service-user` is supported only when running as root!"
+    );
+    assert_eq!(
+        env.stdout(&["services", "list"]),
+        "Name         Status User File\nscenario-svc none                 \n",
+        "the service must still be unloaded"
+    );
+    assert!(
+        !env.sandbox
+            .home
+            .join("Library/LaunchAgents/homebrew.mxcl.scenario-svc.plist")
+            .exists(),
+        "nothing may be installed into LaunchAgents"
+    );
+}
+
 // ---------------------------------------------------------- general CLI
 
 /// `brew` with no arguments prints `HOMEBREW_HELP_MESSAGE` on stderr and
