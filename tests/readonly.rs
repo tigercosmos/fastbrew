@@ -36,8 +36,14 @@ fn version_prints_homebrew_then_fastbrew() {
     let sandbox = sandbox_or_skip!();
     let out = sandbox.stdout(&["--version"]);
     let mut lines = out.lines();
-    assert_eq!(lines.next(), Some("Homebrew 6.0.22"));
-    assert_eq!(lines.next(), Some("fastbrew 0.1.0"));
+    assert_eq!(
+        lines.next(),
+        Some(format!("Homebrew {}", fastbrew::HOMEBREW_COMPAT_VERSION).as_str())
+    );
+    assert_eq!(
+        lines.next(),
+        Some(format!("fastbrew {}", env!("CARGO_PKG_VERSION")).as_str())
+    );
     assert_eq!(lines.next(), None);
 
     // `-v` in command position is Homebrew's alias for `--version`.
