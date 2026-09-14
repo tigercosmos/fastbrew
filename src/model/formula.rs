@@ -275,7 +275,7 @@ impl FormulaEntry {
         let disabled = disable.is_some()
             && disable_date
                 .as_deref()
-                .is_none_or(|d| d.to_string() <= today());
+                .is_none_or(|d| d <= today().as_str());
         let deprecated = deprecate.is_some() || !disabled;
         // `DeprecateDisable.message` reads `deprecation_reason` whenever the
         // formula is deprecated at all, and `deprecate!`'s fields win when it

@@ -291,16 +291,9 @@ pub fn find_installed_dependents(
         }
     }
 
-    // Installed casks count as dependents too.
-    for token in deps::installed_cask_tokens(cfg) {
-        let Some(cask) = index.cask(&token) else {
-            continue;
-        };
-        let needs: Vec<String> = cask
-            .formula_dependencies()
-            .iter()
-            .map(|d| deps::short_name(d).to_string())
-            .collect();
+    // Installed casks count as dependents too, including those from a tap the
+    // index does not carry.
+    for (token, needs) in deps::installed_cask_dependencies(cfg, index) {
         let mut needed_any = false;
         for keg in &going {
             if needs.contains(&keg.name) {

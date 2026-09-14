@@ -413,12 +413,8 @@ fn installed_dependency_names(cfg: &Config, index: &Index) -> HashSet<String> {
             names.extend(recorded);
         }
     }
-    for token in installed_cask_tokens(cfg) {
-        if let Some(cask) = index.cask(&token) {
-            for dep in cask.formula_dependencies() {
-                names.insert(short_name(&dep).to_string());
-            }
-        }
+    for (_, deps) in installed_cask_dependencies(cfg, index) {
+        names.extend(deps);
     }
     names
 }
@@ -426,6 +422,68 @@ fn installed_dependency_names(cfg: &Config, index: &Index) -> HashSet<String> {
 /// `Utils.name_from_full_name`: the part after the last `/`.
 pub fn short_name(full: &str) -> &str {
     full.rsplit('/').next().unwrap_or(full)
+}
+
+/// Each installed cask's token with the formulae it needs at runtime.
+///
+/// The internal API index carries `homebrew/cask` only, so a cask from a
+/// third-party tap has to be read from what its installation recorded: the
+/// `runtime_dependencies` of `Caskroom/<token>/.metadata/INSTALL_RECEIPT.json`
+/// (`Cask::Tab`), falling back to the cask definition its receipt names, which
+/// `resolve` finds in the recorded tap. Without this, `autoremove` would delete
+/// a formula a tap cask depends on and `uninstall` would not name the cask as a
+/// dependent.
+pub fn installed_cask_dependencies(cfg: &Config, index: &Index) -> Vec<(String, Vec<String>)> {
+    installed_cask_tokens(cfg)
+        .into_iter()
+        .map(|token| {
+            let receipt = cask_receipt(cfg, &token);
+            if let Some(deps) = receipt.as_ref().and_then(receipt_formula_dependencies)
+                && !deps.is_empty()
+            {
+                return (token, deps);
+            }
+            let reference = match receipt.as_ref().and_then(|r| r.source.tap.as_deref()) {
+                Some(tap) if tap != "homebrew/cask" && !tap.is_empty() => {
+                    format!("{tap}/{token}")
+                }
+                _ => token.clone(),
+            };
+            let deps = crate::resolve::resolve_cask(cfg, index, &reference)
+                .map(|c| {
+                    c.formula_dependencies()
+                        .iter()
+                        .map(|d| short_name(d).to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (token, deps)
+        })
+        .collect()
+}
+
+fn cask_receipt(cfg: &Config, token: &str) -> Option<crate::model::receipt::CaskReceipt> {
+    let path = cfg
+        .caskroom()
+        .join(token)
+        .join(".metadata/INSTALL_RECEIPT.json");
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// `runtime_dependencies` is `{"formula": [{"full_name": ..}], "cask": [..]}`.
+fn receipt_formula_dependencies(
+    receipt: &crate::model::receipt::CaskReceipt,
+) -> Option<Vec<String>> {
+    Some(
+        receipt
+            .runtime_dependencies
+            .get("formula")?
+            .as_array()?
+            .iter()
+            .filter_map(|d| d.get("full_name").and_then(|v| v.as_str()))
+            .map(|n| short_name(n).to_string())
+            .collect(),
+    )
 }
 
 /// Every name an installed formula can be referred to by (`possible_names`).
@@ -491,11 +549,9 @@ pub fn removable(cfg: &Config, index: &Index) -> Result<BTreeSet<String>> {
             };
         edges.insert(name.clone(), deps);
     }
-    let cask_deps: Vec<String> = installed_cask_tokens(cfg)
-        .iter()
-        .filter_map(|t| index.cask(t))
-        .flat_map(|c| c.formula_dependencies())
-        .map(|d| short_name(&d).to_string())
+    let cask_deps: Vec<String> = installed_cask_dependencies(cfg, index)
+        .into_iter()
+        .flat_map(|(_, deps)| deps)
         .collect();
 
     loop {

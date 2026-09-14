@@ -109,7 +109,7 @@ fn links_into(sb: &Sandbox, name: &str) -> Vec<String> {
                 {
                     found.push(relative.to_string_lossy().into_owned());
                 }
-            } else if path.is_dir() && !path.starts_with(&sb.prefix.join("Cellar")) {
+            } else if path.is_dir() && !path.starts_with(sb.prefix.join("Cellar")) {
                 stack.push(path);
             }
         }
@@ -621,6 +621,78 @@ fn removing_a_dependency_then_autoremoving_the_orphan() {
     );
     assert!(!sb.prefix.join("Cellar/oniguruma").exists());
     assert_eq!(ok(&sb, &["list"]), "");
+}
+
+/// Record an installed cask from a third-party tap that needs `formula`.
+///
+/// Only the Caskroom metadata matters here: the index carries `homebrew/cask`
+/// alone, so the receipt is the only record of what a tap cask depends on.
+fn add_tap_cask(sb: &Sandbox, token: &str, version: &str, tap: &str, formula: &str) {
+    let caskroom = sb.prefix.join("Caskroom").join(token);
+    std::fs::create_dir_all(caskroom.join(version)).unwrap();
+    std::fs::create_dir_all(caskroom.join(".metadata")).unwrap();
+    let receipt = serde_json::json!({
+        "homebrew_version": "6.0.22",
+        "loaded_from_api": true,
+        "loaded_from_internal_api": true,
+        "uninstall_flight_blocks": false,
+        "installed_on_request": true,
+        "time": 1778031361u64,
+        "runtime_dependencies": {
+            "formula": [{"full_name": formula, "declared_directly": true}]
+        },
+        "source": {"tap": tap, "tap_git_head": null, "version": version, "path": null},
+        "arch": "arm64",
+        "uninstall_artifacts": [],
+    });
+    std::fs::write(
+        caskroom.join(".metadata/INSTALL_RECEIPT.json"),
+        serde_json::to_string_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_tap_casks_dependency_is_neither_autoremoved_nor_uninstalled() {
+    let sb = sandbox_or_skip!();
+
+    let version = api_pkg_version("hello");
+    // Installed as a dependency, so nothing but a dependent keeps it.
+    sb.add_keg("hello", &version, false);
+
+    let orphan = ok(&sb, &["autoremove", "--dry-run"]);
+    assert!(
+        orphan.lines().any(|l| l == "hello"),
+        "without a dependent it is unneeded:\n{orphan}"
+    );
+
+    add_tap_cask(&sb, "fixture-app", "1.0", "review/fixture", "hello");
+
+    let kept = ok(&sb, &["autoremove", "--dry-run"]);
+    assert!(
+        !kept.lines().any(|l| l == "hello"),
+        "the tap cask's dependency stays:\n{kept}"
+    );
+    assert!(keg(&sb, "hello", &version).is_dir());
+
+    let refused = fails(&sb, &["uninstall", "hello"]);
+    assert!(
+        refused.contains(&format!(
+            "Error: Refusing to uninstall {}",
+            keg(&sb, "hello", &version).display()
+        )),
+        "{refused}"
+    );
+    assert!(
+        refused.contains("because it is required by fixture-app, which is currently installed."),
+        "{refused}"
+    );
+    assert!(keg(&sb, "hello", &version).is_dir());
+
+    // With the cask gone it is unneeded again.
+    std::fs::remove_dir_all(sb.prefix.join("Caskroom/fixture-app")).unwrap();
+    let again = ok(&sb, &["autoremove", "--dry-run"]);
+    assert!(again.lines().any(|l| l == "hello"), "{again}");
 }
 
 #[test]
