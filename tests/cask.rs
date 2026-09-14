@@ -1,15 +1,18 @@
 //! End-to-end cask tests.
 //!
-//! Both tests run entirely inside the sandbox `scripts/sandbox.sh` creates
-//! (`$FASTBREW_SANDBOX`), or a private tree under `target/` when the suite is
-//! run outside it. Nothing here touches `/opt/homebrew`, `/Applications` or the
-//! real `~/Library`.
+//! Every test runs entirely inside the sandbox `scripts/sandbox.sh` creates
+//! (`$FASTBREW_SANDBOX`), a private tree under `target/` when the suite is run
+//! outside it, or the temporary prefix of a [`support::Sandbox`]. Nothing here
+//! touches `/opt/homebrew`, `/Applications` or the real `~/Library`.
 //!
-//! - `installs_and_uninstalls_a_local_cask` needs no network: the container is
-//!   written straight into the download cache at the path `download_cask` would
-//!   use, so the download step is a cache hit.
+//! - The fake-cask tests need no network: the container is written straight
+//!   into the download cache at the path `download_cask` would use, so the
+//!   download step is a cache hit. A cask whose container is *not* cached and
+//!   whose url points at a dead local port stands in for a failed download.
 //! - `installs_and_uninstalls_rectangle` is gated on `FASTBREW_TEST_NETWORK=1`
 //!   and exercises the real dmg pipeline.
+
+mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,7 +20,7 @@ use std::process::Command;
 use fastbrew::api::index::Index;
 use fastbrew::cask::artifacts;
 use fastbrew::cask::config::CaskDirs;
-use fastbrew::cask::install::{CaskInstallOptions, install_cask_entry};
+use fastbrew::cask::install::{CaskInstallOptions, install_cask_entry, upgrade_cask_entry};
 use fastbrew::cask::uninstall::uninstall_installed_cask;
 use fastbrew::cask::{self, download};
 use fastbrew::config::Config;
@@ -386,4 +389,463 @@ fn installs_and_uninstalls_rectangle() {
         .expect("uninstall rectangle");
     assert!(!app.exists(), "{} survived the uninstall", app.display());
     assert!(cask::installed_cask(&cfg, &cask.token).is_none());
+}
+
+// ------------------------------------------------ replace/upgrade fixtures
+
+/// Build `app` carrying `version` in its executable and zip it with `ditto`.
+fn build_versioned_zip(root: &Path, token: &str, app: &str, version: &str) -> PathBuf {
+    let staging = root.join(format!("tmp/{token}-{version}-src"));
+    let _ = std::fs::remove_dir_all(&staging);
+    let bundle = staging.join(app);
+    std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+    std::fs::write(
+        bundle.join("Contents/Info.plist"),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>org.fastbrew.{token}</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+<key>CFBundleVersion</key><string>{version}</string>
+</dict></plist>
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        bundle.join("Contents/MacOS/demo"),
+        format!("#!/bin/sh\necho {version}\n"),
+    )
+    .unwrap();
+
+    let zip = root.join(format!("tmp/{token}-{version}.zip"));
+    let _ = std::fs::remove_file(&zip);
+    let status = Command::new("ditto")
+        .args(["-c", "-k", "--sequesterRsrc"])
+        .arg(&staging)
+        .arg(&zip)
+        .status()
+        .expect("run ditto");
+    assert!(status.success(), "ditto failed to build the fixture zip");
+    zip
+}
+
+/// The url a fake cask version is served from. It is never fetched: the
+/// container is seeded into the cache under exactly this url's cache path.
+fn fake_url(token: &str, version: &str) -> String {
+    format!("https://example.invalid/fastbrew/{token}-{version}.zip")
+}
+
+/// A url nothing listens on, for an upgrade whose download must fail.
+fn dead_url(token: &str, version: &str) -> String {
+    format!("http://127.0.0.1:9/{token}-{version}.zip")
+}
+
+/// A cask entry with a single `app` artifact.
+fn app_entry(token: &str, app: &str, version: &str, url: &str, sha256: &str) -> CaskEntry {
+    entry(
+        token,
+        json!({
+            "homepage": "https://example.invalid/",
+            "names": [app.trim_end_matches(".app")],
+            "tap_string": "homebrew/cask",
+            "version": version,
+            "url_args": [url],
+            "sha256": sha256,
+            "raw_artifacts": [[":app", [app]]]
+        }),
+    )
+}
+
+/// Build `version` of `token`, seed the download cache with it, and return the
+/// entry that installs it straight from the cache.
+fn cached_app_entry(cfg: &Config, root: &Path, token: &str, app: &str, version: &str) -> CaskEntry {
+    let zip = build_versioned_zip(root, token, app, version);
+    let url = fake_url(token, version);
+    let cached = download::cached_location(cfg, &url, &format!("{token}-{version}.zip"));
+    std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    std::fs::copy(&zip, &cached).unwrap();
+    app_entry(
+        token,
+        app,
+        version,
+        &url,
+        &download::file_sha256(&zip).unwrap(),
+    )
+}
+
+/// Sorted names of the entries directly inside `dir`.
+fn entries(dir: &Path) -> Vec<String> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut names: Vec<String> = read
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Sorted relative paths of everything under `root`.
+fn tree(root: &Path) -> Vec<String> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            out.push(
+                path.strip_prefix(base)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            if path.is_dir() && !path.is_symlink() {
+                walk(base, &path, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// The version `build_versioned_zip` wrote into the installed app.
+fn app_version(app: &Path) -> String {
+    let script = std::fs::read_to_string(app.join("Contents/MacOS/demo"))
+        .unwrap_or_else(|e| panic!("read {}: {e}", app.display()));
+    script
+        .trim()
+        .rsplit(' ')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Caskroom entries a backed-up predecessor would leave behind.
+fn backup_leftovers(caskroom: &Path) -> Vec<String> {
+    tree(caskroom)
+        .into_iter()
+        .filter(|name| name.contains(".upgrading") || name.contains(".backup"))
+        .collect()
+}
+
+/// Install `version` of a fake cask from the seeded cache.
+fn install_fake(cfg: &Config, root: &Path, dirs: &CaskDirs, token: &str, app: &str, version: &str) {
+    let cask = cached_app_entry(cfg, root, token, app, version);
+    install_cask_entry(cfg, None, dirs, &cask, &CaskInstallOptions::default())
+        .unwrap_or_else(|e| panic!("install {token} {version}: {e}"));
+}
+
+// --------------------------------------------------- dry run and rollback
+
+#[test]
+fn dry_run_install_of_an_outdated_cask_changes_nothing() {
+    let root = sandbox_root();
+    let cfg = sandbox_config(&root);
+    let dirs = CaskDirs::resolve(&cfg, &[]);
+    let token = "fastbrew-dry-upgrade";
+    let app = "FastbrewDryUpgrade.app";
+    reset(&cfg, &dirs, token, app);
+
+    install_fake(&cfg, &root, &dirs, token, app, "1.0");
+    let caskroom = cask::caskroom_path(&cfg, token);
+    let app_path = dirs.appdir.join(app);
+    let before = tree(&caskroom);
+
+    // 2.0 is neither cached nor reachable: a dry run must not fetch it, and
+    // must not start the upgrade that would remove 1.0.
+    let outdated = app_entry(token, app, "2.0", &dead_url(token, "2.0"), &"0".repeat(64));
+    let opts = CaskInstallOptions {
+        dry_run: true,
+        ..CaskInstallOptions::default()
+    };
+    install_cask_entry(&cfg, None, &dirs, &outdated, &opts).expect("the dry run succeeds");
+
+    assert_eq!(tree(&caskroom), before, "the dry run changed the Caskroom");
+    assert_eq!(cask::installed_cask(&cfg, token).unwrap().version, "1.0");
+    assert_eq!(app_version(&app_path), "1.0");
+    reset(&cfg, &dirs, token, app);
+}
+
+#[test]
+fn a_failed_upgrade_download_keeps_the_installed_version() {
+    let root = sandbox_root();
+    let cfg = sandbox_config(&root);
+    let dirs = CaskDirs::resolve(&cfg, &[]);
+    let token = "fastbrew-failed-download";
+    let app = "FastbrewFailedDownload.app";
+    reset(&cfg, &dirs, token, app);
+
+    install_fake(&cfg, &root, &dirs, token, app, "1.0");
+    let caskroom = cask::caskroom_path(&cfg, token);
+    let app_path = dirs.appdir.join(app);
+    let before = tree(&caskroom);
+
+    // Nothing is cached for 2.0 and nothing answers on the url.
+    let outdated = app_entry(token, app, "2.0", &dead_url(token, "2.0"), &"0".repeat(64));
+    let error = install_cask_entry(&cfg, None, &dirs, &outdated, &CaskInstallOptions::default())
+        .expect_err("the upgrade must fail");
+    assert!(
+        error.to_string().contains("Failed to download"),
+        "unexpected error: {error}"
+    );
+
+    // The working 1.0 install survived the failure untouched.
+    assert!(app_path.is_dir(), "{} was removed", app_path.display());
+    assert_eq!(app_version(&app_path), "1.0");
+    assert_eq!(cask::installed_cask(&cfg, token).unwrap().version, "1.0");
+    assert_eq!(tree(&caskroom), before);
+    assert!(
+        backup_leftovers(&caskroom).is_empty(),
+        "backup directories left behind: {:?}",
+        backup_leftovers(&caskroom)
+    );
+    reset(&cfg, &dirs, token, app);
+}
+
+#[test]
+fn a_failed_upgrade_restores_the_previous_version() {
+    let root = sandbox_root();
+    let cfg = sandbox_config(&root);
+    let dirs = CaskDirs::resolve(&cfg, &[]);
+    let token = "fastbrew-failed-stage";
+    let app = "FastbrewFailedStage.app";
+    reset(&cfg, &dirs, token, app);
+
+    install_fake(&cfg, &root, &dirs, token, app, "1.0");
+    let caskroom = cask::caskroom_path(&cfg, token);
+    let app_path = dirs.appdir.join(app);
+
+    // A cached "container" that is not an archive: the download and its
+    // checksum pass, and the install fails once the predecessor has been moved
+    // aside, which is exactly when the rollback has to run.
+    let url = fake_url(token, "2.0");
+    let cached = download::cached_location(&cfg, &url, &format!("{token}-2.0.zip"));
+    std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    std::fs::write(&cached, b"not an archive\n").unwrap();
+    let broken = app_entry(
+        token,
+        app,
+        "2.0",
+        &url,
+        &download::file_sha256(&cached).unwrap(),
+    );
+
+    install_cask_entry(&cfg, None, &dirs, &broken, &CaskInstallOptions::default())
+        .expect_err("the upgrade must fail");
+
+    // The predecessor is back in place and still installed.
+    assert!(app_path.is_dir(), "{} was not restored", app_path.display());
+    assert_eq!(app_version(&app_path), "1.0");
+    let installed = cask::installed_cask(&cfg, token).expect("1.0 is still installed");
+    assert_eq!(installed.version, "1.0");
+    assert!(installed.staged_path().join(app).is_symlink());
+    assert!(installed.metadata_versioned_path().is_dir());
+    assert!(
+        backup_leftovers(&caskroom).is_empty(),
+        "backup directories left behind: {:?}",
+        backup_leftovers(&caskroom)
+    );
+    assert!(!caskroom.join("2.0").exists(), "2.0 was left staged");
+    reset(&cfg, &dirs, token, app);
+    let _ = std::fs::remove_file(&cached);
+}
+
+#[test]
+fn a_successful_upgrade_leaves_one_version() {
+    let root = sandbox_root();
+    let cfg = sandbox_config(&root);
+    let dirs = CaskDirs::resolve(&cfg, &[]);
+    let token = "fastbrew-upgrade";
+    let app = "FastbrewUpgrade.app";
+    reset(&cfg, &dirs, token, app);
+
+    install_fake(&cfg, &root, &dirs, token, app, "1.0");
+    install_fake(&cfg, &root, &dirs, token, app, "2.0");
+
+    let caskroom = cask::caskroom_path(&cfg, token);
+    let app_path = dirs.appdir.join(app);
+    assert_eq!(app_version(&app_path), "2.0");
+    let installed = cask::installed_cask(&cfg, token).expect("2.0 is installed");
+    assert_eq!(installed.version, "2.0");
+    assert!(installed.staged_path().join(app).is_symlink());
+
+    // Exactly one staged version and one versioned metadata directory.
+    assert_eq!(entries(&caskroom), [".metadata", "2.0"]);
+    assert_eq!(
+        entries(&caskroom.join(".metadata")),
+        ["2.0", "INSTALL_RECEIPT.json", "config.json"]
+    );
+    assert!(backup_leftovers(&caskroom).is_empty());
+    reset(&cfg, &dirs, token, app);
+}
+
+#[test]
+fn reinstalling_the_same_version_keeps_one_version() {
+    let root = sandbox_root();
+    let cfg = sandbox_config(&root);
+    let dirs = CaskDirs::resolve(&cfg, &[]);
+    let token = "fastbrew-reinstall";
+    let app = "FastbrewReinstall.app";
+    reset(&cfg, &dirs, token, app);
+
+    install_fake(&cfg, &root, &dirs, token, app, "1.0");
+    let caskroom = cask::caskroom_path(&cfg, token);
+    let app_path = dirs.appdir.join(app);
+
+    // `reinstall` replaces the installed version through the same backup and
+    // purge as an upgrade, so the Caskroom ends up exactly as it started.
+    let cask = cached_app_entry(&cfg, &root, token, app, "1.0");
+    let opts = CaskInstallOptions {
+        reinstall: true,
+        ..CaskInstallOptions::default()
+    };
+    install_cask_entry(&cfg, None, &dirs, &cask, &opts).expect("reinstall 1.0");
+
+    assert!(app_path.is_dir(), "{} was removed", app_path.display());
+    assert_eq!(app_version(&app_path), "1.0");
+    let installed = cask::installed_cask(&cfg, token).expect("1.0 is installed");
+    assert_eq!(installed.version, "1.0");
+    assert!(installed.staged_path().join(app).is_symlink());
+    assert_eq!(entries(&caskroom), [".metadata", "1.0"]);
+    assert_eq!(
+        entries(&caskroom.join(".metadata")),
+        ["1.0", "INSTALL_RECEIPT.json", "config.json"]
+    );
+    // The reinstall left exactly one timestamped metadata directory.
+    assert_eq!(entries(&caskroom.join(".metadata/1.0")).len(), 1);
+    assert!(backup_leftovers(&caskroom).is_empty());
+    reset(&cfg, &dirs, token, app);
+}
+
+#[test]
+fn the_upgrade_entry_point_replaces_the_installed_version() {
+    let root = sandbox_root();
+    let cfg = sandbox_config(&root);
+    let dirs = CaskDirs::resolve(&cfg, &[]);
+    let token = "fastbrew-upgrade-entry";
+    let app = "FastbrewUpgradeEntry.app";
+    reset(&cfg, &dirs, token, app);
+
+    install_fake(&cfg, &root, &dirs, token, app, "1.0");
+    let installed = cask::installed_cask(&cfg, token).expect("1.0 is installed");
+
+    // `upgrade --cask` drives this entry point directly.
+    let next = cached_app_entry(&cfg, &root, token, app, "2.0");
+    upgrade_cask_entry(
+        &cfg,
+        None,
+        &dirs,
+        &next,
+        &installed,
+        &CaskInstallOptions::default(),
+    )
+    .expect("upgrade to 2.0");
+
+    let caskroom = cask::caskroom_path(&cfg, token);
+    assert_eq!(app_version(&dirs.appdir.join(app)), "2.0");
+    assert_eq!(cask::installed_cask(&cfg, token).unwrap().version, "2.0");
+    assert_eq!(entries(&caskroom), [".metadata", "2.0"]);
+    assert!(backup_leftovers(&caskroom).is_empty());
+    reset(&cfg, &dirs, token, app);
+}
+
+// -------------------------------------------------------------- the CLI
+
+/// Write the Caskroom records and the app of a `version` install of `token`,
+/// the way `uninstall` and `install` read them back.
+fn fake_cli_install(sandbox: &support::Sandbox, token: &str, version: &str, app: &str) -> PathBuf {
+    let apps = sandbox.home.join("Applications");
+    let installed_app = apps.join(app);
+    std::fs::create_dir_all(installed_app.join("Contents/MacOS")).unwrap();
+    std::fs::write(installed_app.join("Contents/MacOS/demo"), "#!/bin/sh\n").unwrap();
+
+    let caskroom = sandbox.prefix.join("Caskroom").join(token);
+    let staged = caskroom.join(version);
+    std::fs::create_dir_all(&staged).unwrap();
+    let link = staged.join(app);
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&installed_app, &link).unwrap();
+
+    let metadata = caskroom.join(fastbrew::cask::METADATA_SUBDIR);
+    let timestamped = metadata.join(version).join("20250101000000.000");
+    std::fs::create_dir_all(timestamped.join("Casks")).unwrap();
+    std::fs::write(
+        timestamped.join("Casks").join(format!("{token}.json")),
+        "{}",
+    )
+    .unwrap();
+    std::fs::write(
+        metadata.join("config.json"),
+        serde_json::to_string(&json!({
+            "default": {"appdir": "/Applications"},
+            "env": {"appdir": apps.to_string_lossy()},
+            "explicit": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        metadata.join("INSTALL_RECEIPT.json"),
+        serde_json::to_string(&json!({
+            "homebrew_version": fastbrew::HOMEBREW_COMPAT_VERSION,
+            "loaded_from_api": true,
+            "installed_on_request": true,
+            "uninstall_artifacts": [{"app": [app]}],
+            "source": {"tap": "homebrew/cask", "version": version},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    installed_app
+}
+
+/// A CLI sandbox plus the version the seeded API index serves for `token`, or
+/// `None` when there is no cached API file to resolve names against.
+fn cli_sandbox(token: &str) -> Option<(support::Sandbox, String)> {
+    let sandbox = support::Sandbox::new()?;
+    let version = support::api_index()?.cask(token)?.version?;
+    Some((sandbox, version))
+}
+
+#[test]
+fn cli_install_cask_dry_run_reports_an_upgrade() {
+    let Some((sandbox, version)) = cli_sandbox("rectangle") else {
+        eprintln!("no cached Homebrew API file available; skipping");
+        return;
+    };
+    if version == "1.0" {
+        eprintln!("skipping: the API index serves rectangle 1.0");
+        return;
+    }
+    let app = fake_cli_install(&sandbox, "rectangle", "1.0", "Rectangle.app");
+    let caskroom = sandbox.prefix.join("Caskroom/rectangle");
+    let before = tree(&caskroom);
+
+    let out = sandbox
+        .cmd()
+        .env(
+            "HOMEBREW_CASK_OPTS",
+            format!("--appdir={}", sandbox.home.join("Applications").display()),
+        )
+        .args(["install", "--cask", "--dry-run", "rectangle"])
+        .output()
+        .expect("run fastbrew");
+    let stdout = support::strip_ansi(&String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "install --dry-run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains(&format!("Would upgrade rectangle 1.0 -> {version}")),
+        "{stdout}"
+    );
+
+    assert!(app.is_dir(), "the dry run removed {}", app.display());
+    assert_eq!(tree(&caskroom), before, "the dry run changed the Caskroom");
 }

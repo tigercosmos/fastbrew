@@ -31,6 +31,17 @@ pub const METADATA_SUBDIR: &str = ".metadata";
 /// in `Cask::Caskroom::CASKFILE_EXTENSIONS` order.
 pub const CASKFILE_EXTENSIONS: &[&str] = &["json", "internal.json", "rb"];
 
+/// Suffix `Cask::Installer#backup_path` gives the staged directory and the
+/// versioned metadata of the version an in-flight install is replacing.
+pub const BACKUP_SUFFIX: &str = ".upgrading";
+
+/// `Cask::Installer#backup_path`: `<path>.upgrading`.
+pub fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(BACKUP_SUFFIX);
+    path.with_file_name(name)
+}
+
 /// Installed cask discovered in the Caskroom.
 #[derive(Debug, Clone)]
 pub struct InstalledCask {
@@ -112,6 +123,14 @@ fn latest_timestamped_path(caskroom_path: &Path) -> Option<PathBuf> {
     let mut best: Option<PathBuf> = None;
     for version in std::fs::read_dir(&metadata).ok()?.flatten() {
         if !version.path().is_dir() {
+            continue;
+        }
+        // A version an install moved aside is not an installed version.
+        if version
+            .file_name()
+            .to_string_lossy()
+            .ends_with(BACKUP_SUFFIX)
+        {
             continue;
         }
         let Ok(stamps) = std::fs::read_dir(version.path()) else {

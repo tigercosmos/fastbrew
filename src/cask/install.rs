@@ -121,8 +121,14 @@ pub fn upgrade_casks(
     if upgrades.is_empty() {
         return Ok(());
     }
+    // `Cask::Upgrade.show_upgrade_summary`.
     output::ohai(&format!(
-        "Upgrading {} outdated {}:",
+        "{} {} outdated {}:",
+        if opts.dry_run {
+            "Would upgrade"
+        } else {
+            "Upgrading"
+        },
         upgrades.len(),
         if upgrades.len() == 1 {
             "package"
@@ -203,7 +209,9 @@ pub fn install_cask_entry(
             }
             return Ok(());
         }
-        return upgrade_cask_entry(cfg, index, dirs, cask, installed, opts);
+        // `prelude` already ran above; a dry run stops inside `upgrade_installed`
+        // before anything is removed.
+        return upgrade_installed(cfg, index, dirs, cask, installed, opts);
     }
 
     let version = cask.version.clone().unwrap_or_else(|| "latest".to_string());
@@ -212,27 +220,57 @@ pub fn install_cask_entry(
         return Ok(());
     }
 
+    // `Cask::Installer#install` fetches before it touches an installed version:
+    // a download failure must leave the working install alone.
     let download = super::download::download_cask(cfg, cask, opts.quiet)?;
     install_dependencies(cfg, index, dirs, cask, opts)?;
 
-    if let Some(installed) = &installed {
-        // Reinstall/force: remove the existing version first.
-        super::uninstall::uninstall_installed_cask(
-            cfg,
-            dirs,
-            installed,
-            Some(cask),
-            opts.zap,
-            true,
-        )?;
+    match &installed {
+        // `reinstall` and `--force` over an installed version replace it
+        // through the same backup/restore dance an upgrade uses.
+        Some(installed) => replace_installed(cfg, index, dirs, cask, installed, opts, &download),
+        None => install_download(cfg, index, dirs, cask, opts, &download, false),
     }
+}
 
-    output::ohai(&format!("Installing Cask {}", cask.token));
+/// Stage a fetched container and install its artifacts, purging the version's
+/// files again when any step fails (`Cask::Installer#install`).
+fn install_download(
+    cfg: &Config,
+    index: Option<&Index>,
+    dirs: &CaskDirs,
+    cask: &CaskEntry,
+    opts: &CaskInstallOptions,
+    download: &Path,
+    replacing: bool,
+) -> Result<()> {
     let ctx = CaskContext::from_entry(cfg, cask);
+    match install_staged(cfg, index, dirs, cask, opts, download, &ctx) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // Leave the Caskroom entry itself in place while a predecessor is
+            // backed up inside it.
+            purge_versioned_files(cfg, cask, &ctx, opts.upgrade || replacing);
+            Err(error)
+        }
+    }
+}
+
+fn install_staged(
+    cfg: &Config,
+    index: Option<&Index>,
+    dirs: &CaskDirs,
+    cask: &CaskEntry,
+    opts: &CaskInstallOptions,
+    download: &Path,
+    ctx: &CaskContext,
+) -> Result<()> {
+    let version = cask.version.clone().unwrap_or_else(|| "latest".to_string());
+    output::ohai(&format!("Installing Cask {}", cask.token));
     let specs = artifacts::artifact_specs(cfg, dirs, cask);
     let uninstall_artifacts = artifacts::specs_to_json(&specs);
 
-    stage(cfg, cask, &download, &ctx.staged_path, opts.verbose)?;
+    stage(cfg, cask, download, &ctx.staged_path, opts.verbose)?;
 
     let input = ReceiptInput {
         cask,
@@ -259,10 +297,7 @@ pub fn install_cask_entry(
     let previous_metadata = super::installed_cask(cfg, &cask.token).and_then(|c| c.metadata_path);
     metadata::write_caskfile(&input, previous_metadata.as_deref())?;
 
-    if let Err(error) = artifacts::install_specs(cfg, dirs, &specs, &ctx, opts.artifact_options()) {
-        purge_versioned_files(cfg, cask, &ctx, opts.upgrade);
-        return Err(error);
-    }
+    artifacts::install_specs(cfg, dirs, &specs, ctx, opts.artifact_options())?;
 
     metadata::write_config(cfg, dirs, &input.config_path, &opts.explicit_dir_flags)?;
     metadata::write_receipt(&input)?;
@@ -271,7 +306,7 @@ pub fn install_cask_entry(
             &ctx.caskroom_path
                 .join(super::METADATA_SUBDIR)
                 .join("LATEST_DOWNLOAD_SHA256"),
-            super::download::file_sha256(&download)?.as_bytes(),
+            super::download::file_sha256(download)?.as_bytes(),
         );
     }
 
@@ -293,44 +328,166 @@ pub fn upgrade_cask_entry(
     installed: &InstalledCask,
     opts: &CaskInstallOptions,
 ) -> Result<()> {
-    output::ohai(&format!("Upgrading {}", cask.token));
-    println!(
-        "  {} -> {}",
-        installed.version,
-        cask.version.as_deref().unwrap_or("latest")
-    );
+    if !opts.dry_run {
+        prelude(cfg, cask)?;
+    }
+    upgrade_installed(cfg, index, dirs, cask, installed, opts)
+}
+
+/// `upgrade_cask_entry` without the `prelude` its callers have already run.
+fn upgrade_installed(
+    cfg: &Config,
+    index: Option<&Index>,
+    dirs: &CaskDirs,
+    cask: &CaskEntry,
+    installed: &InstalledCask,
+    opts: &CaskInstallOptions,
+) -> Result<()> {
+    let version = cask.version.as_deref().unwrap_or("latest");
+    // A dry run reports the upgrade and stops: nothing installed is touched.
+    if opts.dry_run {
+        println!(
+            "Would upgrade {} {} -> {version}",
+            cask.full_token(),
+            installed.version
+        );
+        return Ok(());
+    }
 
     let mut opts = opts.clone();
     opts.upgrade = true;
     opts.reinstall = false;
 
-    // The predecessor's artifacts move back into its staged directory, then the
-    // new version installs over them.
+    output::ohai(&format!("Upgrading {}", cask.token));
+    println!("  {} -> {version}", installed.version);
+
+    // `Cask::Upgrade.upgrade_cask` fetches the new version first, so a failed
+    // download leaves the installed one running.
+    let download = super::download::download_cask(cfg, cask, opts.quiet)?;
+    install_dependencies(cfg, index, dirs, cask, &opts)?;
+    replace_installed(cfg, index, dirs, cask, installed, &opts, &download)
+}
+
+/// Replace `installed` with a fetched `cask`, in `Cask::Upgrade.upgrade_cask`'s
+/// order: move the predecessor's artifacts back into its staged directory,
+/// rename that directory and its metadata aside (`Installer#backup`), install
+/// the new version and only then purge the backup. Any failure puts the
+/// predecessor back (`Installer#restore_backup`, `#revert_upgrade`).
+fn replace_installed(
+    cfg: &Config,
+    index: Option<&Index>,
+    dirs: &CaskDirs,
+    cask: &CaskEntry,
+    installed: &InstalledCask,
+    opts: &CaskInstallOptions,
+    download: &Path,
+) -> Result<()> {
     let predecessor_specs = installed_specs(cfg, dirs, installed, Some(cask));
     let predecessor_ctx = installed_context(installed);
+    let predecessor_opts = ArtifactOptions {
+        force: true,
+        ..opts.artifact_options()
+    };
     artifacts::uninstall_specs(
         cfg,
         dirs,
         &predecessor_specs,
         &predecessor_ctx,
-        false,
-        ArtifactOptions {
-            force: true,
-            ..opts.artifact_options()
-        },
+        opts.zap,
+        predecessor_opts,
     )?;
 
-    install_cask_entry(cfg, index, dirs, cask, &opts)?;
-
-    if installed.version != cask.version.as_deref().unwrap_or("latest") {
-        output::ohai(&format!(
-            "Purging files for version {} of Cask {}",
-            installed.version, cask.token
-        ));
-        let _ = unpack::remove_path(&installed.staged_path());
-        let _ = std::fs::remove_dir_all(installed.metadata_versioned_path());
+    let backup = Backup::create(installed)?;
+    match install_download(cfg, index, dirs, cask, opts, download, true) {
+        Ok(()) => {
+            // `Cask::Installer#finalize_upgrade`.
+            if opts.upgrade {
+                output::ohai(&format!(
+                    "Purging files for version {} of Cask {}",
+                    installed.version, cask.token
+                ));
+            }
+            backup.purge();
+            Ok(())
+        }
+        Err(error) => {
+            // `Cask::Installer#revert_upgrade`: the predecessor was working, so
+            // put its staged files, metadata and artifacts back.
+            output::opoo(&format!("Reverting upgrade for Cask {}", cask.token));
+            backup.restore();
+            if let Err(rollback) = artifacts::install_specs(
+                cfg,
+                dirs,
+                &predecessor_specs,
+                &predecessor_ctx,
+                predecessor_opts,
+            ) {
+                output::opoo(&format!(
+                    "Rolling back the failed upgrade of {} also failed: {rollback}",
+                    cask.token
+                ));
+            }
+            Err(error)
+        }
     }
-    Ok(())
+}
+
+/// The predecessor moved aside while its replacement installs
+/// (`Cask::Installer#backup_path` and `#backup_metadata_path`).
+struct Backup {
+    staged: PathBuf,
+    staged_backup: PathBuf,
+    metadata: PathBuf,
+    metadata_backup: PathBuf,
+}
+
+impl Backup {
+    /// `Cask::Installer#backup`.
+    fn create(installed: &InstalledCask) -> Result<Backup> {
+        let staged = installed.staged_path();
+        let metadata = installed.metadata_versioned_path();
+        let backup = Backup {
+            staged_backup: super::backup_path(&staged),
+            metadata_backup: super::backup_path(&metadata),
+            staged,
+            metadata,
+        };
+        for (from, to) in [
+            (&backup.staged, &backup.staged_backup),
+            (&backup.metadata, &backup.metadata_backup),
+        ] {
+            // A backup left behind by an interrupted run is stale.
+            let _ = unpack::remove_path(to);
+            if (from.exists() || from.is_symlink())
+                && let Err(error) = std::fs::rename(from, to)
+            {
+                // Put back whatever already moved: nothing may be lost here.
+                backup.restore();
+                return Err(error.into());
+            }
+        }
+        Ok(backup)
+    }
+
+    /// `Cask::Installer#restore_backup`.
+    fn restore(&self) {
+        for (backup, original) in [
+            (&self.staged_backup, &self.staged),
+            (&self.metadata_backup, &self.metadata),
+        ] {
+            if !backup.is_dir() {
+                continue;
+            }
+            let _ = unpack::remove_path(original);
+            let _ = std::fs::rename(backup, original);
+        }
+    }
+
+    /// `Cask::Installer#purge_backed_up_versioned_files`.
+    fn purge(&self) {
+        let _ = unpack::remove_path(&self.staged_backup);
+        let _ = unpack::remove_path(&self.metadata_backup);
+    }
 }
 
 // ------------------------------------------------------------- checks

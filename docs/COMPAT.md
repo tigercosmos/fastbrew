@@ -353,6 +353,23 @@ application is already running, otherwise AppleScript would launch it. macOS
 Homebrew trashes through `NSFileManager#trashItemAtURL`; fastbrew moves the
 path into `~/.Trash`, uniquifying the name.
 
+Replacing an installed version (`upgrade`, `reinstall`, `install --force`, and
+the automatic upgrade `install` does for an outdated cask) follows
+`Cask::Upgrade.upgrade_cask`: fetch and verify the new container first, move the
+predecessor's artifacts back into its staged directory, rename
+`Caskroom/<token>/<version>` to `<version>.upgrading` and
+`.metadata/<version>` to `<version>.upgrading` (`Installer#backup`), stage and
+install the new version, then delete both backups
+(`#purge_backed_up_versioned_files`). Any failure after the rename restores them
+and reinstalls the predecessor's artifacts (`#restore_backup`,
+`#revert_upgrade`), so a failed upgrade leaves the working version installed. A
+`.upgrading` directory is a version in flight, not an installed one, and is
+skipped when discovering installed casks.
+
+`--dry-run` never writes: `install --cask` prints
+`Would install cask <token> <version>`, or `Would upgrade <token> <old> -> <new>`
+when the cask is installed and outdated; `upgrade --cask` prints
+`==> Would upgrade N outdated packages:` (`Cask::Upgrade.show_upgrade_summary`).
 ## 7. Services
 
 Plist path in the keg: `$CELLAR/<name>/<version>/homebrew.mxcl.<name>.plist` (label `homebrew.mxcl.<name>`; `service_name_args[":macos"]` overrides both). Homebrew also writes `homebrew.<name>.service` (systemd) into the keg, and `homebrew.<name>.timer` for `:cron`/`:interval` services.
