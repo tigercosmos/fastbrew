@@ -5,7 +5,7 @@
 #   scripts/sandbox.sh create [DIR]   create (or recreate) the sandbox tree
 #   scripts/sandbox.sh env [DIR]      print `export` lines for the sandbox
 #   scripts/sandbox.sh run [DIR] -- CMD...   run CMD inside the sandbox env
-#   scripts/sandbox.sh test [DIR]     create a fresh sandbox and run cargo integration tests
+#   scripts/sandbox.sh test [DIR] [cargo test args]   fresh sandbox + integration tests
 #   scripts/sandbox.sh brew [DIR]     clone the Ruby Homebrew into the sandbox prefix (for A/B benchmarks)
 #   scripts/sandbox.sh destroy [DIR]  remove the sandbox
 #
@@ -18,8 +18,13 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cmd="${1:-}"
 shift || true
 
-dir="${1:-}"
-if [[ "$dir" == "--" ]]; then dir=""; else shift || true; fi
+# An optional DIR is recognised only when it looks like a path; anything else
+# (e.g. a cargo test filter after `test`) is passed through in "$@".
+dir=""
+case "${1:-}" in
+  --) shift ;;
+  */*|.|..) dir="$1"; shift ;;
+esac
 dir="${dir:-${FASTBREW_SANDBOX:-$repo_root/target/sandbox}}"
 dir="$(cd "$(dirname "$dir")" 2>/dev/null && pwd)/$(basename "$dir")"
 
@@ -48,7 +53,10 @@ bottle_tag() {
 }
 
 print_env() {
+  # Overriding HOME must not break the Rust toolchain lookup.
   cat <<EOV
+export RUSTUP_HOME="\${RUSTUP_HOME:-$HOME/.rustup}"
+export CARGO_HOME="\${CARGO_HOME:-$HOME/.cargo}"
 export HOMEBREW_PREFIX="$prefix"
 export HOMEBREW_CELLAR="$prefix/Cellar"
 export HOMEBREW_REPOSITORY="$prefix"
