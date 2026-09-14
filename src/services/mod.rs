@@ -696,6 +696,52 @@ pub fn info(cfg: &Config, name: &str) -> Result<ServiceInfo> {
     Ok(find(cfg, name)?.info(cfg))
 }
 
+/// `brew services info <formula>` for a formula that ships no service file.
+///
+/// `InfoSubcommand` builds a `FormulaWrapper` around any formula, so a
+/// formula without a service prints every flag as false rather than failing.
+pub fn info_or_default(cfg: &Config, name: &str) -> ServiceInfo {
+    if let Some(svc) = read_keg_service(cfg, name) {
+        return svc.info(cfg);
+    }
+    ServiceInfo {
+        name: name.to_string(),
+        label: format!("{}{name}", plist::CANONICAL_PREFIX),
+        status: ServiceStatus::None,
+        user: None,
+        file: None,
+        loaded: false,
+        pid: None,
+        exit_code: None,
+        running: false,
+        schedulable: false,
+        registered: false,
+        loaded_file: None,
+        source_file: cfg
+            .rack(name)
+            .join(format!("{}{name}.plist", plist::PLIST_PREFIX)),
+        command: None,
+        working_dir: None,
+        root_dir: None,
+        log_path: None,
+        error_log_path: None,
+        interval: None,
+        cron: None,
+    }
+}
+
+/// `Formulae.available_services`: every installed formula with a service,
+/// optionally filtered by whether launchd has it loaded.
+pub fn available_services(cfg: &Config, loaded: Option<bool>, skip_root: bool) -> Vec<ServiceInfo> {
+    let known = launchd::loaded_labels();
+    installed_services(cfg)
+        .iter()
+        .map(|s| s.info_with(cfg, Some(&known)))
+        .filter(|s| loaded.is_none_or(|want| s.loaded == want))
+        .filter(|s| !skip_root || s.user.as_deref() != Some("root"))
+        .collect()
+}
+
 /// Remove service files for uninstalled formulae.
 pub fn cleanup(cfg: &Config) -> Result<()> {
     let mut cleaned = 0usize;

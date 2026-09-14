@@ -271,6 +271,35 @@ pub fn tap_git_head(cfg: &Config, tap: &Tap) -> Option<String> {
     head_sha(&tap.path(cfg))
 }
 
+fn git_line(path: &Path, args: &[&str]) -> Option<String> {
+    let out = git(path, args).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!line.is_empty()).then_some(line)
+}
+
+/// `GitRepository#last_committed`: the relative date of `HEAD` (`9 days ago`).
+pub fn git_last_commit(cfg: &Config, tap: &Tap) -> Option<String> {
+    git_line(&tap.path(cfg), &["show", "-s", "--format=%cr", "HEAD"])
+}
+
+/// `GitRepository#branch_name`: the checked-out branch, `HEAD` when detached.
+pub fn git_branch(cfg: &Config, tap: &Tap) -> Option<String> {
+    let reference = git_line(
+        &tap.path(cfg),
+        &["rev-parse", "--symbolic-full-name", "HEAD"],
+    )?;
+    if reference == "HEAD" {
+        return Some(reference);
+    }
+    reference
+        .strip_prefix("refs/heads/")
+        .map(str::to_string)
+        .or(Some(reference))
+}
+
 // ---------------------------------------------------------------------------
 // tap / untap
 // ---------------------------------------------------------------------------
@@ -319,7 +348,8 @@ fn number_readable(n: u64) -> String {
     format!("{out} files")
 }
 
-fn contents(cfg: &Config, tap: &Tap) -> Vec<String> {
+/// `Tap#contents`: `1 command`, `2 casks`, `3 formulae` for what the tap has.
+pub fn contents(cfg: &Config, tap: &Tap) -> Vec<String> {
     let mut out = vec![];
     let commands = command_files(cfg, tap).len();
     if commands > 0 {
@@ -590,7 +620,8 @@ pub fn cask_files(cfg: &Config, tap: &Tap) -> Vec<(String, PathBuf)> {
     by_name(ruby_files(&tap.cask_dir(cfg), true))
 }
 
-/// External commands shipped by the tap (`cmd/*`), used only for the count.
+/// External commands shipped by the tap: every file in `cmd/`
+/// (`Commands.find_commands`, which does not filter by name).
 pub fn command_files(cfg: &Config, tap: &Tap) -> Vec<PathBuf> {
     let dir = tap.path(cfg).join("cmd");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -599,12 +630,7 @@ pub fn command_files(cfg: &Config, tap: &Tap) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("brew-"))
-        })
+        .filter(|p| p.is_file())
         .collect();
     out.sort();
     out

@@ -13,6 +13,7 @@ use crate::ops::cleanup::CleanupOptions;
 use crate::ops::install::InstallOptions;
 use crate::ops::uninstall::UninstallOptions;
 use crate::ops::upgrade::UpgradeOptions;
+use crate::output;
 use crate::resolve::{self, Kind};
 
 use super::Ctx;
@@ -90,7 +91,7 @@ pub fn install(ctx: &Ctx, args: &InstallArgs, reinstall: bool) -> Result<()> {
         };
         return ctx.delegate(reason);
     }
-    crate::update::auto_update_if_needed(&ctx.cfg, "install");
+    crate::update::auto_update_if_needed(&ctx.cfg, "install", &args.names);
     let (formulae, casks) = partition(ctx, &args.names, kind_of(args.formula, args.cask))?;
     let index = ctx.index()?;
 
@@ -160,7 +161,7 @@ pub struct UpgradeArgs {
 }
 
 pub fn upgrade(ctx: &Ctx, args: &UpgradeArgs) -> Result<()> {
-    crate::update::auto_update_if_needed(&ctx.cfg, "upgrade");
+    crate::update::auto_update_if_needed(&ctx.cfg, "upgrade", &args.names);
     let index = ctx.index()?;
     let (formulae, casks) = partition(ctx, &args.names, kind_of(args.formula, args.cask))?;
     let want_formulae = !args.cask || args.formula;
@@ -276,15 +277,36 @@ pub fn cleanup(ctx: &Ctx, args: &CleanupArgs) -> Result<()> {
 pub struct LinkArgs {
     #[arg(value_name = "formula", required = true)]
     pub names: Vec<String>,
+    /// Delete files that already exist in the prefix while linking.
     #[arg(long)]
     pub overwrite: bool,
+    /// Allow keg-only formulae to be linked.
     #[arg(short = 'f', long)]
     pub force: bool,
+    /// List the files that would be linked or deleted.
     #[arg(short = 'n', long)]
     pub dry_run: bool,
+    #[arg(long, visible_alias = "formulae")]
+    pub formula: bool,
+    /// Link a cask's binaries, manpages and completions (delegates to brew).
+    #[arg(long, visible_alias = "casks")]
+    pub cask: bool,
+}
+
+/// The keg `link`/`unlink`/`postinstall` operate on: the latest installed
+/// version (`NamedArgs#resolve_latest_keg`), or `NoSuchKegError`.
+fn latest_keg(ctx: &Ctx, name: &str) -> Result<crate::keg::Keg> {
+    crate::keg::latest_keg(&ctx.cfg, name).ok_or_else(|| {
+        // `NoSuchKegError#to_s`.
+        Error::user(format!("No such keg: {}", ctx.cfg.rack(name).display()))
+    })
 }
 
 pub fn link(ctx: &Ctx, args: &LinkArgs, link_it: bool) -> Result<()> {
+    if args.cask {
+        let what = if link_it { "link" } else { "unlink" };
+        return ctx.delegate(&format!("`{what} --cask` is not implemented by fastbrew"));
+    }
     let index = ctx.index()?;
     let opts = crate::keg::link::LinkOptions {
         overwrite: args.overwrite,
@@ -292,36 +314,205 @@ pub fn link(ctx: &Ctx, args: &LinkArgs, link_it: bool) -> Result<()> {
         verbose: ctx.verbose,
     };
     for name in &args.names {
-        let formula = resolve::resolve_formula(&ctx.cfg, index, name)?;
-        let Some(keg) = crate::keg::latest_keg(&ctx.cfg, &formula.name) else {
-            return Err(Error::user(format!(
-                "No such keg: {}",
-                ctx.cfg.rack(&formula.name).display()
-            )));
-        };
-        if link_it {
-            crate::keg::link::link(&ctx.cfg, &keg, &formula.link_overwrite_paths, opts)?;
-        } else {
-            crate::keg::link::unlink(&ctx.cfg, &keg, opts)?;
+        // A keg may outlive its formula; fall back to the rack's name.
+        let formula = resolve::resolve_formula(&ctx.cfg, index, name).ok();
+        let short = formula
+            .as_ref()
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| name.rsplit('/').next().unwrap_or(name).to_string());
+        let keg = latest_keg(ctx, &short)?;
+
+        if !link_it {
+            if args.dry_run {
+                println!("Would remove:");
+            }
+            if !args.dry_run {
+                print!("Unlinking {}... ", keg.path.display());
+                if ctx.verbose {
+                    println!();
+                }
+                output::flush();
+            }
+            let removed = crate::keg::link::unlink(&ctx.cfg, &keg, opts)?;
+            if !args.dry_run {
+                println!("{removed} symlinks removed.");
+            }
+            continue;
+        }
+
+        if keg.is_linked(&ctx.cfg) {
+            output::opoo(&format!("Already linked: {}", keg.path.display()));
+            let keg_only = formula.as_ref().is_some_and(|f| f.is_keg_only());
+            let flag = if keg_only && !is_versioned_keg_only(formula.as_ref()) {
+                "--force "
+            } else {
+                ""
+            };
+            println!("To relink, run:\n  brew unlink {short} && brew link {flag}{short}");
+            continue;
+        }
+
+        if args.dry_run {
+            println!(
+                "{}",
+                if args.overwrite {
+                    "Would remove:"
+                } else {
+                    "Would link:"
+                }
+            );
+            let globs = formula
+                .as_ref()
+                .map(|f| f.link_overwrite_paths.clone())
+                .unwrap_or_default();
+            crate::keg::link::link(&ctx.cfg, &keg, &globs, opts)?;
+            continue;
+        }
+
+        if let Some(f) = formula.as_ref().filter(|f| f.is_keg_only()) {
+            let by_macos = matches!(
+                f.keg_only().map(|(reason, _)| reason),
+                Some(crate::model::KegOnly::ProvidedByMacos)
+                    | Some(crate::model::KegOnly::ShadowedByMacos)
+            );
+            if by_macos && ctx.cfg.is_default_prefix() {
+                let hint = keg_only_path_message(ctx, &keg);
+                output::opoo(&format!(
+                    "Refusing to link macOS provided/shadowed software: {short}{}",
+                    if hint.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n{}", hint.trim())
+                    }
+                ));
+                continue;
+            }
+            if !args.force && !is_versioned_keg_only(formula.as_ref()) {
+                output::opoo(&format!(
+                    "{short} is keg-only and must be linked with `--force`."
+                ));
+                print!("{}", keg_only_path_message(ctx, &keg));
+                continue;
+            }
+        }
+
+        print!("Linking {}... ", keg.path.display());
+        if ctx.verbose {
+            println!();
+        }
+        output::flush();
+        let globs = formula
+            .as_ref()
+            .map(|f| f.link_overwrite_paths.clone())
+            .unwrap_or_default();
+        match crate::keg::link::link(&ctx.cfg, &keg, &globs, opts) {
+            Ok(n) => println!("{n} symlinks created."),
+            Err(e) => {
+                println!();
+                return Err(e);
+            }
+        }
+        if formula.as_ref().is_some_and(|f| f.is_keg_only())
+            && !is_versioned_keg_only(formula.as_ref())
+        {
+            print!("{}", keg_only_path_message(ctx, &keg));
         }
     }
     Ok(())
+}
+
+fn is_versioned_keg_only(formula: Option<&crate::model::FormulaEntry>) -> bool {
+    formula
+        .and_then(|f| f.keg_only())
+        .map(|(reason, _)| reason == crate::model::KegOnly::VersionedFormula)
+        .unwrap_or(false)
+}
+
+/// `Link#puts_keg_only_path_message`.
+fn keg_only_path_message(ctx: &Ctx, keg: &crate::keg::Keg) -> String {
+    let bin = keg.path.join("bin").is_dir();
+    let sbin = keg.path.join("sbin").is_dir();
+    if !bin && !sbin {
+        return String::new();
+    }
+    let opt = ctx.cfg.opt_record(&keg.name);
+    let mut out =
+        "\nIf you need to have this software first in your PATH instead consider running:\n"
+            .to_string();
+    if bin {
+        out.push_str(&format!(
+            "  {}\n",
+            prepend_path_in_profile(&opt.join("bin").to_string_lossy())
+        ));
+    }
+    if sbin {
+        out.push_str(&format!(
+            "  {}\n",
+            prepend_path_in_profile(&opt.join("sbin").to_string_lossy())
+        ));
+    }
+    out
+}
+
+/// `Utils::Shell.prepend_path_in_profile` for the user's `$SHELL`.
+fn prepend_path_in_profile(path: &str) -> String {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .and_then(|s| s.rsplit('/').next().map(str::to_string))
+        .unwrap_or_else(|| "sh".to_string());
+    let profile = match shell.as_str() {
+        "zsh" => "~/.zshrc",
+        "csh" => "~/.cshrc",
+        "tcsh" => "~/.tcshrc",
+        "fish" => "~/.config/fish/config.fish",
+        "ksh" | "mksh" => "~/.kshrc",
+        _ => "~/.profile",
+    };
+    match shell.as_str() {
+        "fish" => format!("fish_add_path {path}"),
+        "csh" | "tcsh" => format!("echo 'setenv PATH {path}:$PATH' >> {profile}"),
+        _ => format!("echo 'export PATH=\"{path}:$PATH\"' >> {profile}"),
+    }
 }
 
 #[derive(Args, Debug)]
 pub struct PinArgs {
     #[arg(value_name = "formula", required = true)]
     pub names: Vec<String>,
+    #[arg(long, visible_alias = "formulae")]
+    pub formula: bool,
+    /// Pin a cask (delegates to brew).
+    #[arg(long, visible_alias = "casks")]
+    pub cask: bool,
 }
 
 pub fn pin(ctx: &Ctx, args: &PinArgs, pin_it: bool) -> Result<()> {
+    if args.cask {
+        let what = if pin_it { "pin" } else { "unpin" };
+        return ctx.delegate(&format!("`{what} --cask` is not implemented by fastbrew"));
+    }
     let index = ctx.index()?;
     for name in &args.names {
         let formula = resolve::resolve_formula(&ctx.cfg, index, name)?;
+        let full = formula.full_name();
+        let pinned = crate::keg::is_pinned(&ctx.cfg, &formula.name);
+        // `Formula#pinnable?`: there has to be a keg to pin.
+        let pinnable = !crate::keg::installed_kegs(&ctx.cfg, &formula.name).is_empty();
         if pin_it {
-            crate::ops::pin::pin(&ctx.cfg, &formula.name)?;
-        } else {
+            if pinned {
+                output::opoo(&format!("{full} already pinned"));
+            } else if !pinnable {
+                output::ofail(&format!("{full} not installed"));
+            } else {
+                crate::ops::pin::pin(&ctx.cfg, &formula.name)?;
+            }
+        } else if pinned {
             crate::ops::pin::unpin(&ctx.cfg, &formula.name)?;
+        } else if !pinnable {
+            // `cmd/unpin.rb` uses `onoe`, which does not set the exit status.
+            output::onoe(&format!("{full} not installed"));
+        } else {
+            output::opoo(&format!("{full} not pinned"));
         }
     }
     Ok(())
@@ -337,12 +528,7 @@ pub fn postinstall(ctx: &Ctx, args: &PostinstallArgs) -> Result<()> {
     let index = ctx.index()?;
     for name in &args.names {
         let formula = resolve::resolve_formula(&ctx.cfg, index, name)?;
-        let Some(keg) = crate::keg::latest_keg(&ctx.cfg, &formula.name) else {
-            return Err(Error::user(format!(
-                "No such keg: {}",
-                ctx.cfg.rack(&formula.name).display()
-            )));
-        };
+        let keg = latest_keg(ctx, &formula.name)?;
         crate::ops::postinstall::run_post_install(&ctx.cfg, &formula, &keg)?;
     }
     Ok(())
@@ -371,121 +557,6 @@ pub fn fetch(ctx: &Ctx, args: &FetchArgs) -> Result<()> {
     }
     if !casks.is_empty() {
         crate::cask::install::fetch_casks(&ctx.cfg, index, &casks, args.force)?;
-    }
-    Ok(())
-}
-
-#[derive(Args, Debug)]
-pub struct TapArgs {
-    #[arg(value_name = "user/repo")]
-    pub name: Option<String>,
-    #[arg(value_name = "URL")]
-    pub url: Option<String>,
-    #[arg(long)]
-    pub force: bool,
-}
-
-pub fn tap(ctx: &Ctx, args: &TapArgs) -> Result<()> {
-    let Some(name) = &args.name else {
-        for t in crate::tap::installed_taps(&ctx.cfg) {
-            println!("{}", t.name());
-        }
-        return Ok(());
-    };
-    crate::update::auto_update_if_needed(&ctx.cfg, "tap");
-    crate::tap::tap(&ctx.cfg, name, args.url.as_deref(), args.force, ctx.quiet)
-}
-
-#[derive(Args, Debug)]
-pub struct UntapArgs {
-    #[arg(value_name = "user/repo", required = true)]
-    pub names: Vec<String>,
-    #[arg(long)]
-    pub force: bool,
-}
-
-pub fn untap(ctx: &Ctx, args: &UntapArgs) -> Result<()> {
-    for name in &args.names {
-        crate::tap::untap(&ctx.cfg, name, args.force)?;
-    }
-    Ok(())
-}
-
-#[derive(Args, Debug)]
-pub struct ServicesArgs {
-    #[arg(value_name = "subcommand")]
-    pub subcommand: Option<String>,
-    #[arg(value_name = "formula")]
-    pub names: Vec<String>,
-    #[arg(long)]
-    pub json: bool,
-    /// Run the service as root (system domain).
-    #[arg(long)]
-    pub sudo_service_user: bool,
-}
-
-pub fn services(ctx: &Ctx, args: &ServicesArgs) -> Result<()> {
-    let sudo = args.sudo_service_user;
-    let sub = args.subcommand.as_deref().unwrap_or("list");
-    match sub {
-        "list" | "ls" => {
-            let list = crate::services::list(&ctx.cfg)?;
-            if args.json {
-                let doc: Vec<serde_json::Value> = list
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "name": s.name,
-                            "status": format!("{:?}", s.status).to_lowercase(),
-                            "user": s.user,
-                            "file": s.file.as_ref().map(|p| p.display().to_string()),
-                            "exit_code": s.exit_code,
-                        })
-                    })
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
-            } else {
-                println!("Name Status User File");
-                for s in list {
-                    println!(
-                        "{} {:?} {} {}",
-                        s.name,
-                        s.status,
-                        s.user.unwrap_or_default(),
-                        s.file.map(|p| p.display().to_string()).unwrap_or_default()
-                    );
-                }
-            }
-            Ok(())
-        }
-        "info" => {
-            for name in &args.names {
-                let info = crate::services::info(&ctx.cfg, name)?;
-                println!("{} ({}): {:?}", info.name, info.label, info.status);
-            }
-            Ok(())
-        }
-        "start" => run_each(ctx, &args.names, sudo, crate::services::start),
-        "stop" => run_each(ctx, &args.names, sudo, crate::services::stop),
-        "restart" => run_each(ctx, &args.names, sudo, crate::services::restart),
-        "run" => run_each(ctx, &args.names, sudo, crate::services::run),
-        "kill" => run_each(ctx, &args.names, sudo, crate::services::kill),
-        "cleanup" => crate::services::cleanup(&ctx.cfg),
-        other => Err(Error::user(format!("Unknown subcommand: {other}"))),
-    }
-}
-
-fn run_each(
-    ctx: &Ctx,
-    names: &[String],
-    sudo: bool,
-    f: fn(&crate::config::Config, &str, bool) -> Result<()>,
-) -> Result<()> {
-    if names.is_empty() {
-        return Err(Error::user("This command requires a formula argument"));
-    }
-    for name in names {
-        f(&ctx.cfg, name, sudo)?;
     }
     Ok(())
 }

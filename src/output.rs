@@ -43,6 +43,24 @@ pub fn is_quiet() -> bool {
     QUIET.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Homebrew's `Homebrew.failed?`: a command that reported a problem without
+/// aborting (`ofail`) still exits 1. `cli::run` reads this at the end.
+static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `ofail`: print the error and remember that the command failed.
+pub fn ofail(msg: &str) {
+    onoe(msg);
+    set_failed();
+}
+
+pub fn set_failed() {
+    FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_failed() -> bool {
+    FAILED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
 const UNDERLINE: &str = "\x1b[4m";

@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::error::{Error, Result};
 
-use super::{Ctx, misc, mutate, query};
+use super::{Ctx, doctor, misc, mutate, query, services, taps};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -55,6 +55,10 @@ pub enum Cmd {
     Options(OptionsArgs),
     /// Show lists of built-in and external commands.
     Commands(CommandsArgs),
+    /// Control whether tap shell completion files are linked.
+    Completions(CompletionsArgs),
+    /// Check your system for potential problems.
+    Doctor(doctor::DoctorArgs),
     /// Show Homebrew and system configuration info useful for debugging.
     Config,
     /// Print export statements for the current shell.
@@ -93,11 +97,14 @@ pub enum Cmd {
     /// Download a bottle or cask without installing it.
     Fetch(mutate::FetchArgs),
     /// Tap a formula repository.
-    Tap(mutate::TapArgs),
+    Tap(taps::TapArgs),
     /// Remove a tapped formula repository.
-    Untap(mutate::UntapArgs),
+    Untap(taps::UntapArgs),
+    /// Show detailed information about one or more taps.
+    #[command(name = "tap-info")]
+    TapInfo(taps::TapInfoArgs),
     /// Manage background services with macOS' launchctl.
-    Services(mutate::ServicesArgs),
+    Services(services::ServicesArgs),
 
     /// Anything fastbrew does not implement is handed to the Ruby `brew`.
     #[command(external_subcommand)]
@@ -349,6 +356,13 @@ pub struct CommandsArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct CompletionsArgs {
+    /// `link`, `unlink` or `state` (the default).
+    #[arg(value_name = "subcommand")]
+    pub subcommand: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub struct ShellenvArgs {
     #[arg(value_name = "shell")]
     pub shell: Option<String>,
@@ -424,6 +438,8 @@ pub fn dispatch(ctx: &Ctx, argv: &[OsString]) -> Result<()> {
         Cmd::Options(a) => query::options(ctx, a),
         Cmd::WhichFormula(a) => query::which_formula(ctx, a),
         Cmd::Commands(a) => misc::commands(ctx, a),
+        Cmd::Completions(a) => misc::completions(ctx, a),
+        Cmd::Doctor(a) => doctor::doctor(ctx, a),
         Cmd::Config => misc::config(ctx),
         Cmd::Shellenv(a) => misc::shellenv(ctx, a),
         Cmd::Help(a) => misc::help(ctx, a),
@@ -441,9 +457,10 @@ pub fn dispatch(ctx: &Ctx, argv: &[OsString]) -> Result<()> {
         Cmd::Unpin(a) => mutate::pin(ctx, a, false),
         Cmd::Postinstall(a) => mutate::postinstall(ctx, a),
         Cmd::Fetch(a) => mutate::fetch(ctx, a),
-        Cmd::Tap(a) => mutate::tap(ctx, a),
-        Cmd::Untap(a) => mutate::untap(ctx, a),
-        Cmd::Services(a) => mutate::services(ctx, a),
+        Cmd::Tap(a) => taps::tap(ctx, a),
+        Cmd::Untap(a) => taps::untap(ctx, a),
+        Cmd::TapInfo(a) => taps::tap_info(ctx, a),
+        Cmd::Services(a) => services::services(ctx, a),
 
         Cmd::External(args) => {
             let name = args

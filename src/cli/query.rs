@@ -57,7 +57,7 @@ pub fn info(ctx: &Ctx, args: &InfoArgs) -> Result<()> {
     if args.github {
         for name in &args.names {
             let formula = resolve::resolve_formula(&ctx.cfg, index, name)?;
-            misc::open_url(&github_url(&formula))?;
+            misc::open_url(&github_url(&ctx.cfg, &formula))?;
         }
         return Ok(());
     }
@@ -121,18 +121,32 @@ fn print_statistics(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-fn github_url(formula: &FormulaEntry) -> String {
-    let tap = if formula.tap.is_empty() {
+/// `Info#github_remote_path`: a GitHub remote becomes a `blob/HEAD` URL,
+/// anything else is joined as-is.
+fn github_remote_path(remote: &str, path: &str) -> String {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"^(?:https?://|git(?:@|://))github\.com[:/](.+)/(.+?)(?:\.git)?$")
+            .expect("static regex")
+    });
+    match re.captures(remote) {
+        Some(c) => format!("https://github.com/{}/{}/blob/HEAD/{path}", &c[1], &c[2]),
+        None => format!("{remote}/{path}"),
+    }
+}
+
+/// `Info#github_info`: the formula file on its tap's remote.
+fn github_url(cfg: &Config, formula: &FormulaEntry) -> String {
+    let tap_name = if formula.tap.is_empty() {
         "homebrew/core"
     } else {
-        &formula.tap
+        formula.tap.as_str()
     };
-    let (user, repo) = tap.split_once('/').unwrap_or(("Homebrew", "core"));
-    let user = if user == "homebrew" { "Homebrew" } else { user };
-    format!(
-        "https://github.com/{user}/homebrew-{repo}/blob/HEAD/{}",
-        formula.core_ruby_path()
-    )
+    let remote = match crate::tap::Tap::parse(tap_name) {
+        Some(t) => t.remote(cfg).unwrap_or_else(|| t.default_remote()),
+        None => "https://github.com/Homebrew/homebrew-core".to_string(),
+    };
+    github_remote_path(&remote, &formula.ruby_path())
 }
 
 /// Title spec list: `stable <version> (bottled)`, plus `HEAD` when a head spec
@@ -265,7 +279,7 @@ pub fn print_formula_info(ctx: &Ctx, formula: &FormulaEntry) -> Result<()> {
         println!("Not installed");
     }
 
-    println!("From: {}", output::format_url(&github_url(formula)));
+    println!("From: {}", output::format_url(&github_url(cfg, formula)));
     if !formula.tap.is_empty() && formula.tap != "homebrew/core" {
         println!("Tap: {}", formula.tap);
     }
@@ -570,6 +584,31 @@ fn cask_json(ctx: &Ctx, cask: &CaskEntry) -> Result<Value> {
 // search / desc / home
 // ---------------------------------------------------------------------------
 
+/// `Search.search`: match a tap's full names against the query, keeping the
+/// `user/repo/name` form Homebrew prints for tap packages.
+fn search_taps<I>(names: I, query: &SearchQuery) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut hits: Vec<String> = names
+        .into_iter()
+        .filter(|full| {
+            let short = full.rsplit('/').next().unwrap_or(full);
+            match query {
+                SearchQuery::Regex(re) => re.is_match(short) || re.is_match(full),
+                SearchQuery::Text(t) => {
+                    let needle = crate::api::index::simplify(t);
+                    crate::api::index::simplify(short).contains(&needle)
+                        || crate::api::index::simplify(full).contains(&needle)
+                }
+            }
+        })
+        .collect();
+    hits.sort();
+    hits.dedup();
+    hits
+}
+
 pub fn search(ctx: &Ctx, args: &SearchArgs) -> Result<()> {
     if args.query.is_empty() {
         return Err(Error::user(
@@ -647,6 +686,20 @@ pub fn search(ctx: &Ctx, args: &SearchArgs) -> Result<()> {
         Some(target) => !found.contains(&target),
         None => true,
     });
+
+    // `Search.search_taps`: tap packages are listed by their full name.
+    if want_formulae {
+        formulae.extend(search_taps(
+            ctx.taps().all_formulae().iter().map(|f| f.full_name()),
+            &parsed,
+        ));
+    }
+    if want_casks {
+        casks.extend(search_taps(
+            ctx.taps().all_casks().iter().map(|c| c.full_token()),
+            &parsed,
+        ));
+    }
 
     let tty = output::stdout_is_tty();
     if !formulae.is_empty() {
@@ -876,17 +929,29 @@ pub fn list(ctx: &Ctx, args: &ListArgs) -> Result<()> {
     Ok(())
 }
 
+/// `Formula#full_name` for an installed keg: the receipt records which tap it
+/// came from, which is the only source for a formula the API never had.
+fn installed_full_name(ctx: &Ctx, name: &str) -> String {
+    if let Ok(index) = ctx.index()
+        && let Some(f) = index.formula(name)
+    {
+        return f.full_name();
+    }
+    let tap = keg::latest_keg(&ctx.cfg, name)
+        .and_then(|k| k.receipt().ok())
+        .and_then(|r| r.tap().map(str::to_string));
+    match tap {
+        Some(t) if t != "homebrew/core" => format!("{t}/{name}"),
+        _ => name.to_string(),
+    }
+}
+
 fn list_formula_names(ctx: &Ctx, args: &ListArgs) -> Vec<String> {
     let mut names = keg::installed_formula_names(&ctx.cfg);
-    if args.full_name
-        && let Ok(index) = ctx.index()
-    {
+    if args.full_name {
         names = names
             .into_iter()
-            .map(|n| match index.formula(&n) {
-                Some(f) => f.full_name(),
-                None => n,
-            })
+            .map(|n| installed_full_name(ctx, &n))
             .collect();
         names.sort_by(tap_and_name_comparison);
     }
@@ -1292,7 +1357,7 @@ pub fn deps(ctx: &Ctx, args: &DepsArgs) -> Result<()> {
         for root in &roots {
             println!("{root}");
             let mut seen: Vec<String> = Vec::new();
-            print_tree(index, root, "", opts, recursive, &mut seen, args);
+            print_tree(ctx, index, root, "", opts, recursive, &mut seen, args);
             println!();
         }
         return Ok(());
@@ -1353,11 +1418,56 @@ fn collect_deps(
     if runtime && let Some(names) = recorded_runtime_dependencies(ctx, root) {
         return names;
     }
+    // A tap formula is not in the index, so its own `depends_on` list comes
+    // from the parsed entry; the dependencies themselves are core formulae
+    // the index knows about.
+    if !index.has_formula(root)
+        && let Some(direct) = tap_direct_dependencies(ctx, root, opts)
+    {
+        if !recursive {
+            return direct;
+        }
+        let mut all: Vec<String> = Vec::new();
+        for d in direct {
+            for name in deps::recursive_dependency_names(index, &d, opts)
+                .into_iter()
+                .chain(std::iter::once(d))
+            {
+                if !all.contains(&name) {
+                    all.push(name);
+                }
+            }
+        }
+        return all;
+    }
     if recursive {
         deps::recursive_dependency_names(index, root, opts)
     } else {
         deps::direct_dependency_names(index, root, opts, true)
     }
+}
+
+/// `depends_on` of a tap formula, filtered like `deps::direct_dependency_names`.
+fn tap_direct_dependencies(ctx: &Ctx, name: &str, opts: DepOptions) -> Option<Vec<String>> {
+    let index = ctx.index().ok()?;
+    let entry = resolve::resolve_formula(&ctx.cfg, index, name).ok()?;
+    if entry.tap.is_empty() || entry.tap == "homebrew/core" {
+        return None;
+    }
+    Some(
+        entry
+            .dependencies()
+            .into_iter()
+            .filter(|d| {
+                (d.is_runtime()
+                    || (opts.include_build && d.is_build())
+                    || (opts.include_test && d.is_test()))
+                    && (!d.is_optional() || opts.include_optional)
+                    && (!d.is_recommended() || !opts.skip_recommended)
+            })
+            .map(|d| d.name)
+            .collect(),
+    )
 }
 
 /// The runtime closure the installed keg recorded, in receipt order.
@@ -1450,6 +1560,7 @@ fn annotations(_index: &Index, _name: &str, _args: &DepsArgs) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn print_tree(
+    ctx: &Ctx,
     index: &Index,
     name: &str,
     prefix: &str,
@@ -1458,7 +1569,11 @@ fn print_tree(
     seen: &mut Vec<String>,
     args: &DepsArgs,
 ) {
-    let dependables = deps::direct_dependency_names(index, name, opts, seen.is_empty());
+    let dependables = if index.has_formula(name) {
+        deps::direct_dependency_names(index, name, opts, seen.is_empty())
+    } else {
+        tap_direct_dependencies(ctx, name, opts).unwrap_or_default()
+    };
     let max = dependables.len().saturating_sub(1);
     seen.push(name.to_string());
     for (i, dep) in dependables.iter().enumerate() {
@@ -1478,6 +1593,7 @@ fn print_tree(
         }
         let addition = if i == max { "    " } else { "│   " };
         print_tree(
+            ctx,
             index,
             dep,
             &format!("{prefix}{addition}"),
@@ -1540,7 +1656,27 @@ pub fn uses(ctx: &Ctx, args: &UsesArgs) -> Result<()> {
             Some(prev) => prev.into_iter().filter(|x| users.contains(x)).collect(),
         });
     }
-    let users = result.unwrap_or_default();
+    let mut users = result.unwrap_or_default();
+    // Tap formulae are not in the index, so scan their parsed entries too.
+    for name in &args.names {
+        let short = name.rsplit('/').next().unwrap_or(name);
+        for entry in ctx.taps().all_formulae() {
+            if args.installed && keg::installed_kegs(&ctx.cfg, &entry.name).is_empty() {
+                continue;
+            }
+            let declares = entry.dependencies().into_iter().any(|d| {
+                d.name == short
+                    && (d.is_runtime()
+                        || (args.include_build && d.is_build())
+                        || (args.include_test && d.is_test()))
+            });
+            if declares && !users.contains(&entry.full_name()) {
+                users.push(entry.full_name());
+            }
+        }
+    }
+    users.sort();
+    users.dedup();
     if users.is_empty() {
         return Ok(());
     }
@@ -1567,8 +1703,63 @@ pub fn leaves(ctx: &Ctx, args: &LeavesArgs) -> Result<()> {
 // outdated / missing / options / which-formula
 // ---------------------------------------------------------------------------
 
+/// Installed formulae that came from a third-party tap.
+///
+/// `ops::outdated` compares against the packages API, which knows nothing
+/// about them, so their kegs are compared against the tap metadata instead
+/// (`Formula#outdated_kegs` with the tap's version).
+fn outdated_tap_formulae(
+    ctx: &Ctx,
+    names: Option<&[String]>,
+) -> Vec<outdated_ops::OutdatedFormula> {
+    use crate::version::PkgVersion;
+    let taps = ctx.taps();
+    if taps.is_empty() {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    for entry in taps.all_formulae() {
+        if let Some(wanted) = names
+            && !wanted
+                .iter()
+                .any(|n| *n == entry.name || *n == entry.full_name())
+        {
+            continue;
+        }
+        let kegs = keg::installed_kegs(&ctx.cfg, &entry.name);
+        if kegs.is_empty() {
+            continue;
+        }
+        // The keg has to have come from this tap, not from the core API.
+        let from_tap = kegs.iter().any(|k| {
+            k.receipt()
+                .ok()
+                .and_then(|r| r.tap().map(str::to_string))
+                .is_some_and(|t| t.eq_ignore_ascii_case(&entry.tap))
+        });
+        if !from_tap {
+            continue;
+        }
+        let current = PkgVersion::parse(&entry.pkg_version());
+        if current.version.as_str().is_empty() {
+            continue;
+        }
+        if kegs.iter().any(|k| k.version >= current) {
+            continue;
+        }
+        out.push(outdated_ops::OutdatedFormula {
+            name: entry.name.clone(),
+            installed_versions: kegs.iter().map(|k| k.version.to_string()).collect(),
+            current_version: current.to_string(),
+            pinned: keg::is_pinned(&ctx.cfg, &entry.name),
+            pinned_version: outdated_ops::pinned_version(&ctx.cfg, &entry.name),
+        });
+    }
+    out
+}
+
 pub fn outdated(ctx: &Ctx, args: &OutdatedArgs) -> Result<()> {
-    crate::update::auto_update_if_needed(&ctx.cfg, "outdated");
+    crate::update::auto_update_if_needed(&ctx.cfg, "outdated", &args.names);
     let index = ctx.index()?;
     let names = (!args.names.is_empty()).then(|| args.names.clone());
     let greedy = args.greedy || args.greedy_latest || args.greedy_auto_updates;
@@ -1576,7 +1767,11 @@ pub fn outdated(ctx: &Ctx, args: &OutdatedArgs) -> Result<()> {
     let formulae = if args.cask && !args.formula {
         vec![]
     } else {
-        outdated_ops::outdated_formulae(&ctx.cfg, index, names.as_deref())?
+        let mut all = outdated_ops::outdated_formulae(&ctx.cfg, index, names.as_deref())?;
+        all.extend(outdated_tap_formulae(ctx, names.as_deref()));
+        all.sort_by(|a, b| a.name.cmp(&b.name));
+        all.dedup_by(|a, b| a.name == b.name);
+        all
     };
     let casks = if args.formula && !args.cask {
         vec![]
@@ -1762,13 +1957,15 @@ mod tests {
 
     #[test]
     fn github_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::for_test(dir.path());
         let f = FormulaEntry {
             name: "hello".into(),
             tap: "homebrew/core".into(),
             ..Default::default()
         };
         assert_eq!(
-            github_url(&f),
+            github_url(&cfg, &f),
             "https://github.com/Homebrew/homebrew-core/blob/HEAD/Formula/h/hello.rb"
         );
         let lib = FormulaEntry {
@@ -1777,8 +1974,31 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            github_url(&lib),
+            github_url(&cfg, &lib),
             "https://github.com/Homebrew/homebrew-core/blob/HEAD/Formula/lib/libpng.rb"
+        );
+        // A tap formula links to its own file in its own repository.
+        let tapped = FormulaEntry {
+            name: "bun".into(),
+            tap: "oven-sh/bun".into(),
+            ruby_source_path: Some("Formula/bun.rb".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            github_url(&cfg, &tapped),
+            "https://github.com/oven-sh/homebrew-bun/blob/HEAD/Formula/bun.rb"
+        );
+    }
+
+    #[test]
+    fn non_github_remotes_are_joined() {
+        assert_eq!(
+            github_remote_path("https://example.com/x/homebrew-y", "Formula/foo.rb"),
+            "https://example.com/x/homebrew-y/Formula/foo.rb"
+        );
+        assert_eq!(
+            github_remote_path("git@github.com:user/homebrew-tap.git", "Formula/foo.rb"),
+            "https://github.com/user/homebrew-tap/blob/HEAD/Formula/foo.rb"
         );
     }
 }

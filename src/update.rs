@@ -14,6 +14,9 @@ use crate::platform::Host;
 #[derive(Debug, Clone, Default)]
 pub struct UpdateReport {
     pub api_updated: bool,
+    pub auto_update: bool,
+    /// Tap names whose `HEAD` moved, plus `homebrew/core`/`homebrew/cask`
+    /// when the API file changed (`updated_taps` in `cmd/update-report.rb`).
     pub taps_updated: Vec<String>,
     pub new_formulae: Vec<String>,
     pub updated_formulae: Vec<String>,
@@ -24,9 +27,12 @@ pub struct UpdateReport {
     pub deleted_casks: Vec<String>,
     pub outdated_formulae: Vec<String>,
     pub outdated_casks: Vec<String>,
+    /// One-line descriptions for the `New Formulae` and `New Casks` sections.
+    pub descriptions: BTreeMap<String, String>,
 }
 
 impl UpdateReport {
+    /// `ReporterHub#empty?`: nothing to report about formulae or casks.
     pub fn is_empty(&self) -> bool {
         self.new_formulae.is_empty()
             && self.updated_formulae.is_empty()
@@ -35,7 +41,11 @@ impl UpdateReport {
             && self.new_casks.is_empty()
             && self.updated_casks.is_empty()
             && self.deleted_casks.is_empty()
-            && self.taps_updated.is_empty()
+    }
+
+    /// Whether anything at all moved (`updated` in `output_update_report`).
+    pub fn updated(&self) -> bool {
+        !self.taps_updated.is_empty()
     }
 }
 
@@ -116,22 +126,37 @@ fn age(path: &PathBuf) -> Option<Duration> {
     SystemTime::now().duration_since(mtime).ok()
 }
 
+/// `full_name -> pkg_version` for every parsed third-party tap formula.
+fn tap_snapshot(cfg: &Config, tag: &crate::platform::BottleTag) -> BTreeMap<String, String> {
+    crate::api::taps::TapIndex::load(cfg, tag)
+        .all_formulae()
+        .into_iter()
+        .map(|f| (f.full_name(), f.pkg_version()))
+        .collect()
+}
+
 pub fn update(cfg: &Config, force: bool, quiet: bool, auto: bool) -> Result<UpdateReport> {
     let tag = Host::detect().bottle_tag();
-    let mut report = UpdateReport::default();
-
-    // Snapshot the current generation before the file is replaced.
-    let before = Index::load(cfg, &tag).ok().map(|i| snapshot(&i));
-
-    let stale = if force {
-        None
-    } else if auto {
-        Some(cfg.auto_update_secs)
-    } else {
-        None
+    let mut report = UpdateReport {
+        auto_update: auto,
+        ..Default::default()
     };
-    let outcome = fetch::fetch_packages(cfg, &tag, stale, quiet)?;
-    report.api_updated = outcome == FetchOutcome::Updated;
+
+    // Snapshot both generations before anything is replaced.
+    let before = Index::load(cfg, &tag).ok().map(|i| snapshot(&i));
+    let taps_before = tap_snapshot(cfg, &tag);
+
+    // `API.fetch_api_files!`: an auto-update accepts a file younger than
+    // `HOMEBREW_API_AUTO_UPDATE_SECS`; an explicit `update` always revalidates.
+    let stale = (!force && auto).then_some(cfg.api_auto_update_secs);
+
+    // The API fetch and the tap pulls are independent; run them together.
+    let (api, taps) = rayon::join(
+        || fetch::fetch_packages(cfg, &tag, stale, quiet),
+        || crate::tap::update_all(cfg, true),
+    );
+    let moved_taps = taps.unwrap_or_default();
+    report.api_updated = api? == FetchOutcome::Updated;
 
     // Rebuild (or reuse) the fast index for the current file.
     let index = if report.api_updated {
@@ -140,14 +165,49 @@ pub fn update(cfg: &Config, force: bool, quiet: bool, auto: bool) -> Result<Upda
         Index::load(cfg, &tag)?
     };
 
-    if let Some(before) = before
-        && report.api_updated
-    {
-        diff(&before, &snapshot(&index), &mut report);
+    if report.api_updated {
+        report.taps_updated.push("homebrew/core".to_string());
+        report.taps_updated.push("homebrew/cask".to_string());
+        if let Some(before) = before {
+            diff(&before, &snapshot(&index), &mut report);
+        }
     }
+    for t in &moved_taps {
+        report.taps_updated.push(t.name());
+        // Re-reading the tap picks up the files the pull changed.
+        let after = tap_snapshot(cfg, &tag);
+        for (name, version) in &after {
+            match taps_before.get(name) {
+                None => report.new_formulae.push(name.clone()),
+                Some(old) if old != version => report.updated_formulae.push(name.clone()),
+                _ => {}
+            }
+        }
+        for name in taps_before.keys() {
+            if !after.contains_key(name) {
+                report.deleted_formulae.push(name.clone());
+            }
+        }
+    }
+    report.taps_updated.sort();
+    report.taps_updated.dedup();
+    report.new_formulae.sort();
+    report.new_formulae.dedup();
+    report.updated_formulae.sort();
+    report.updated_formulae.dedup();
+    report.deleted_formulae.sort();
+    report.deleted_formulae.dedup();
 
-    // TODO(phase2): tap::update_all(cfg, quiet) to fetch and fast-forward
-    // third-party taps and fill in `report.taps_updated`.
+    // `dump_new_formula_report` prints `name: desc` for each new name.
+    for name in report.new_formulae.iter().chain(report.new_casks.iter()) {
+        let desc = index
+            .formula_desc(name)
+            .or_else(|| index.cask_desc(name))
+            .filter(|d| !d.is_empty());
+        if let Some(d) = desc {
+            report.descriptions.insert(name.clone(), d);
+        }
+    }
 
     report.outdated_formulae = crate::ops::outdated::outdated_formulae(cfg, &index, None)?
         .into_iter()
@@ -163,32 +223,57 @@ pub fn update(cfg: &Config, force: bool, quiet: bool, auto: bool) -> Result<Upda
     Ok(report)
 }
 
+/// `HOMEBREW_AUTO_UPDATE_SECS`'s default: 5 minutes when a third-party tap
+/// reference is on the command line (its metadata is not in the API), else
+/// 24 hours (`utils/auto-update.sh`, `env_config.rb`).
+fn auto_update_secs(cfg: &Config, args: &[String]) -> u64 {
+    if std::env::var_os("HOMEBREW_AUTO_UPDATE_SECS").is_some_and(|v| !v.is_empty()) {
+        return cfg.auto_update_secs;
+    }
+    let tap_arg = args
+        .iter()
+        .any(|a| a.matches('/').count() == 2 && !a.to_lowercase().starts_with("homebrew/"));
+    if tap_arg { 300 } else { cfg.auto_update_secs }
+}
+
 /// Run the auto-update if policy says so; never fails the calling command.
-pub fn auto_update_if_needed(cfg: &Config, command: &str) {
+///
+/// `args` are the command's named arguments, which decide the staleness
+/// window (`AUTO_UPDATE_TAP_COMMANDS` in `utils/auto-update.sh`).
+pub fn auto_update_if_needed(cfg: &Config, command: &str, args: &[String]) {
     if cfg.no_auto_update {
         return;
     }
-    if !matches!(command, "install" | "upgrade" | "outdated" | "tap") {
+    // `setup-auto-update`: `tap` only auto-updates when given a tap name.
+    let wanted = match command {
+        "install" | "upgrade" | "outdated" => true,
+        "tap" => !args.is_empty(),
+        _ => false,
+    };
+    if !wanted {
         return;
     }
-    // Only check again after `HOMEBREW_API_AUTO_UPDATE_SECS`.
+    // The marker stands in for the repositories' `FETCH_HEAD` mtimes: skip
+    // when everything was checked within `HOMEBREW_AUTO_UPDATE_SECS`.
     if let Some(a) = age(&last_check_marker(cfg))
-        && a < Duration::from_secs(cfg.api_auto_update_secs)
-    {
-        return;
-    }
-    // Only refresh when the cached API file is older than
-    // `HOMEBREW_AUTO_UPDATE_SECS`.
-    let tag = Host::detect().bottle_tag();
-    let packages = fetch::packages_path(cfg, &tag);
-    if let Some(a) = age(&packages)
-        && a < Duration::from_secs(cfg.auto_update_secs)
+        && a < Duration::from_secs(auto_update_secs(cfg, args))
     {
         return;
     }
     let quiet = std::env::var_os("HOMEBREW_AUTO_UPDATE_QUIET").is_some_and(|v| !v.is_empty());
+    // `HOMEBREW_AUTO_UPDATE_SKIP_OUTDATED`: a bare `upgrade`/`outdated` lists
+    // the outdated packages itself, so the report must not repeat them.
+    let skip_outdated = matches!(command, "upgrade" | "outdated") && args.is_empty();
     match update(cfg, false, true, true) {
-        Ok(report) if !quiet && !report.is_empty() => print_report(cfg, &report, true),
+        Ok(mut report) if !quiet && !report.is_empty() => {
+            if skip_outdated {
+                report.outdated_formulae.clear();
+                report.outdated_casks.clear();
+            }
+            output::ohai("Auto-updated Homebrew!");
+            print_report(cfg, &report, true);
+            println!();
+        }
         _ => {}
     }
 }
@@ -201,56 +286,137 @@ fn print_section(title: &str, items: &[String]) {
     output::print_columns(items);
 }
 
+/// `Utils::Text.to_sentence`: `a`, `a and b`, `a, b and c`.
+fn to_sentence(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        _ => {
+            let (last, rest) = items.split_last().expect("non-empty");
+            format!("{} and {last}", rest.join(", "))
+        }
+    }
+}
+
+/// `Homebrew::Cmd::UpdateReport#output_update_report` plus `ReporterHub#dump`.
+///
+/// Homebrew 6 no longer prints "Updated Formulae", "Renamed Formulae" or
+/// plain "Deleted Formulae" sections: only new packages, deleted packages
+/// that are installed, and the outdated summary.
 pub fn print_report(cfg: &Config, report: &UpdateReport, quiet: bool) {
-    let _ = cfg;
     if !report.taps_updated.is_empty() {
         println!(
-            "Updated {}.",
-            output::plural(report.taps_updated.len() as u64, "tap")
+            "Updated {} ({}).",
+            output::plural(report.taps_updated.len() as u64, "tap"),
+            to_sentence(&report.taps_updated)
         );
     }
-    if report.is_empty() {
-        if !quiet {
+    if !report.updated() {
+        if !quiet && !report.auto_update {
             println!("Already up-to-date.");
         }
         return;
     }
-
-    print_section("New Formulae", &report.new_formulae);
-    if !quiet {
-        print_section("Updated Formulae", &report.updated_formulae);
-    } else if !report.updated_formulae.is_empty() {
-        println!(
-            "==> Updated {}.",
-            output::plural(report.updated_formulae.len() as u64, "Formula")
-        );
+    if report.is_empty() {
+        if !quiet {
+            println!("No changes to formulae or casks.");
+        }
+        return;
     }
-    if !report.renamed_formulae.is_empty() {
-        output::ohai("Renamed Formulae");
-        for (from, to) in &report.renamed_formulae {
-            println!("{from} -> {to}");
+    if quiet {
+        return;
+    }
+
+    let described = |names: &[String]| -> Vec<String> {
+        names
+            .iter()
+            .map(|n| match report.descriptions.get(n) {
+                Some(d) => format!("{n}: {d}"),
+                None => n.clone(),
+            })
+            .collect()
+    };
+    // `dump_new_formula_report` drops names that are already installed.
+    let new_formulae: Vec<String> = report
+        .new_formulae
+        .iter()
+        .filter(|n| !cfg.rack(crate::deps::short_name(n)).is_dir())
+        .cloned()
+        .collect();
+    if !new_formulae.is_empty() {
+        output::ohai("New Formulae");
+        for line in described(&new_formulae) {
+            println!("{line}");
         }
     }
-    print_section("Deleted Formulae", &report.deleted_formulae);
-    print_section("New Casks", &report.new_casks);
-    if !quiet {
-        print_section("Updated Casks", &report.updated_casks);
-    } else if !report.updated_casks.is_empty() {
-        println!(
-            "==> Updated {}.",
-            output::plural(report.updated_casks.len() as u64, "Cask")
-        );
+    let any_casks = crate::deps::installed_cask_tokens(cfg).is_empty();
+    if !any_casks {
+        let new_casks: Vec<String> = report
+            .new_casks
+            .iter()
+            .filter(|t| !cfg.caskroom().join(t).is_dir())
+            .cloned()
+            .collect();
+        if !new_casks.is_empty() {
+            output::ohai("New Casks");
+            for line in described(&new_casks) {
+                println!("{line}");
+            }
+        }
     }
-    print_section("Deleted Casks", &report.deleted_casks);
-    print_section("Outdated Formulae", &report.outdated_formulae);
-    print_section("Outdated Casks", &report.outdated_casks);
-    if !report.outdated_formulae.is_empty() || !report.outdated_casks.is_empty() {
-        println!(
-            "\nYou have {} and {} installed.\nYou can upgrade them with `fastbrew upgrade`\nor list them with `fastbrew outdated`.",
-            output::plural(report.outdated_formulae.len() as u64, "outdated formula"),
-            output::plural(report.outdated_casks.len() as u64, "outdated cask"),
-        );
+    let deleted_formulae: Vec<String> = report
+        .deleted_formulae
+        .iter()
+        .filter(|n| cfg.rack(crate::deps::short_name(n)).is_dir())
+        .cloned()
+        .collect();
+    print_section("Deleted Installed Formulae", &deleted_formulae);
+    let deleted_casks: Vec<String> = report
+        .deleted_casks
+        .iter()
+        .filter(|t| cfg.caskroom().join(t).is_dir())
+        .cloned()
+        .collect();
+    print_section("Deleted Installed Casks", &deleted_casks);
+
+    if !report.auto_update {
+        print_section("Outdated Formulae", &report.outdated_formulae);
+        print_section("Outdated Casks", &report.outdated_casks);
     }
+    let (formulae, casks) = (report.outdated_formulae.len(), report.outdated_casks.len());
+    if formulae == 0 && casks == 0 {
+        return;
+    }
+    let mut msg = String::new();
+    if formulae > 0 {
+        msg.push_str(&format!(
+            "{} outdated {}",
+            output::bold(&formulae.to_string()),
+            if formulae == 1 { "formula" } else { "formulae" }
+        ));
+    }
+    if casks > 0 {
+        if !msg.is_empty() {
+            msg.push_str(" and ");
+        }
+        msg.push_str(&format!(
+            "{} outdated {}",
+            output::bold(&casks.to_string()),
+            if casks == 1 { "cask" } else { "casks" }
+        ));
+    }
+    println!();
+    println!("You have {msg} installed.");
+    if report.auto_update {
+        return;
+    }
+    let pronoun = if formulae + casks == 1 { "it" } else { "them" };
+    println!(
+        "You can upgrade {pronoun} with {}\nor list {pronoun} with {}.",
+        output::bold("brew upgrade"),
+        output::bold("brew outdated")
+    );
 }
 
 #[cfg(test)]

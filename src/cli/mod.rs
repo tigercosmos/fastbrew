@@ -8,15 +8,19 @@
 //! `pub fn run(cfg: &Config, args: &<Args>) -> Result<()>`.
 
 pub mod commands;
+pub mod doctor;
 pub mod fmt;
 pub mod misc;
 pub mod mutate;
 pub mod query;
+pub mod services;
+pub mod taps;
 
 use std::cell::OnceCell;
 use std::ffi::OsString;
 
 use crate::api::index::Index;
+use crate::api::taps::TapIndex;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::output;
@@ -66,6 +70,7 @@ pub struct Ctx {
     /// Raw argv, for delegation.
     pub argv: Vec<OsString>,
     index: OnceCell<Index>,
+    taps: OnceCell<TapIndex>,
 }
 
 impl Ctx {
@@ -76,6 +81,16 @@ impl Ctx {
         let index = Index::load(&self.cfg, &self.tag)?;
         let _ = self.index.set(index);
         Ok(self.index.get().expect("index just set"))
+    }
+
+    /// Metadata of every installed third-party tap, loaded once per run.
+    ///
+    /// Only commands that list or scan everything need this; single-name
+    /// lookups go through `resolve`, which reaches for a tap only when the
+    /// API has no such name.
+    pub fn taps(&self) -> &TapIndex {
+        self.taps
+            .get_or_init(|| TapIndex::load(&self.cfg, &self.tag))
     }
 
     /// `exec` the Ruby `brew` with this invocation's arguments.
@@ -135,6 +150,7 @@ fn dispatch(argv: Vec<OsString>) -> Result<i32> {
         tag,
         argv,
         index: OnceCell::new(),
+        taps: OnceCell::new(),
     };
 
     // Pseudo-commands whose names start with `--` are handled before clap,
@@ -148,11 +164,12 @@ fn dispatch(argv: Vec<OsString>) -> Result<i32> {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         misc::run_path_command(&ctx, name, &rest)?;
-        return Ok(0);
+        return Ok(i32::from(output::is_failed()));
     }
 
     commands::dispatch(&ctx, &normalized)?;
-    Ok(0)
+    // `Homebrew.failed?`: commands that reported a problem without aborting.
+    Ok(i32::from(output::is_failed()))
 }
 
 /// Global flags Homebrew accepts anywhere on the command line.
