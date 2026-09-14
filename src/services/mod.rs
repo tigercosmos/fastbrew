@@ -278,6 +278,13 @@ impl KegService {
         None
     }
 
+    /// The installed service file lives in `/Library/LaunchDaemons`.
+    fn is_root_service(&self, cfg: &Config) -> bool {
+        self.registered_destination(cfg)
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .is_some_and(|dir| dir == launchd::boot_path())
+    }
+
     fn path_dirs(&self, cfg: &Config) -> Vec<PathBuf> {
         let def = plist::ServiceDef {
             working_dir: self.working_dir.clone(),
@@ -290,11 +297,37 @@ impl KegService {
         def.path_dirs(cfg)
     }
 
-    /// Build the `ServiceInfo` Homebrew's `to_hash` produces.
+    /// Build the `ServiceInfo` Homebrew's `to_hash` produces, probing launchd
+    /// for every candidate label.
     pub fn info(&self, cfg: &Config) -> ServiceInfo {
-        let status = self
-            .labels
-            .iter()
+        self.info_with(cfg, None)
+    }
+
+    /// `info`, but skipping the per-label `launchctl print` probes for services
+    /// that a single `launchctl list` already showed are not loaded.
+    ///
+    /// `loaded` is the label set from `launchd::loaded_labels`. Root services
+    /// are not in a user's `launchctl list`, so a plist in `/Library/LaunchDaemons`
+    /// is still probed the slow way.
+    pub fn info_with(
+        &self,
+        cfg: &Config,
+        loaded: Option<&std::collections::HashSet<String>>,
+    ) -> ServiceInfo {
+        let probe: Vec<&String> = match loaded {
+            None => self.labels.iter().collect(),
+            Some(known) => {
+                let hits: Vec<&String> =
+                    self.labels.iter().filter(|l| known.contains(*l)).collect();
+                if hits.is_empty() && self.is_root_service(cfg) {
+                    self.labels.iter().collect()
+                } else {
+                    hits
+                }
+            }
+        };
+        let status = probe
+            .into_iter()
             .find_map(|label| launchd::find_service(label, false).filter(|s| s.success));
         let parsed = status.as_ref().map(|s| s.info());
         let pid = parsed.as_ref().and_then(|p| p.pid).filter(|p| *p > 0);
@@ -376,10 +409,18 @@ fn shell_join(args: &[String]) -> String {
 // ---------------------------------------------------------------------------
 
 /// All installed formulae that ship a service, with their current status.
+///
+/// One `launchctl list` tells us which labels are loaded at all, so the
+/// per-label `launchctl print` probes only run for services that are.
 pub fn list(cfg: &Config) -> Result<Vec<ServiceInfo>> {
-    Ok(installed_services(cfg)
+    let services = installed_services(cfg);
+    if services.is_empty() {
+        return Ok(vec![]);
+    }
+    let loaded = launchd::loaded_labels();
+    Ok(services
         .iter()
-        .map(|s| s.info(cfg))
+        .map(|s| s.info_with(cfg, Some(&loaded)))
         .collect())
 }
 

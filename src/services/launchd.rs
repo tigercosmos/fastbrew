@@ -237,6 +237,30 @@ pub fn service_loaded(label: &str, sudo: bool) -> bool {
     find_service(label, sudo).is_some_and(|s| s.success)
 }
 
+/// Every label `launchctl list` reports for this user (`Cli.running`).
+///
+/// One process instead of a `launchctl print` per label and domain; callers
+/// re-read it after any change, since it is a snapshot.
+pub fn loaded_labels() -> std::collections::HashSet<String> {
+    let empty = std::collections::HashSet::new();
+    let Ok(output) = run(&["list"], false) else {
+        return empty;
+    };
+    if !output.status.success() {
+        return empty;
+    }
+    parse_list_labels(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Third column of `launchctl list` (`PID\tStatus\tLabel`), header skipped.
+pub fn parse_list_labels(text: &str) -> std::collections::HashSet<String> {
+    text.lines()
+        .filter_map(|line| line.split_whitespace().nth(2))
+        .filter(|label| *label != "Label")
+        .map(str::to_string)
+        .collect()
+}
+
 /// Parse a `launchctl print` or `launchctl list` status blob.
 ///
 /// `print` uses `state = running`, `pid = N`, `last exit code = N`, `path = ...`;
@@ -390,6 +414,19 @@ mod tests {
         assert_eq!(info.pid, Some(1234));
         assert_eq!(info.last_exit_code, Some(0));
         assert!(info.running);
+    }
+
+    #[test]
+    fn parses_launchctl_list_labels() {
+        let text = "PID\tStatus\tLabel\n\
+                    -\t0\tcom.apple.SafariHistoryServiceAgent\n\
+                    4242\t0\thomebrew.mxcl.unbound\n\
+                    -\t78\tsh.brew.redis\n";
+        let labels = parse_list_labels(text);
+        assert!(labels.contains("homebrew.mxcl.unbound"));
+        assert!(labels.contains("sh.brew.redis"));
+        assert!(!labels.contains("Label"));
+        assert_eq!(labels.len(), 3);
     }
 
     #[test]
