@@ -1,15 +1,16 @@
-//! `tap` integration tests. No network: the remote is a local git repository
-//! cloned over `file://`.
+//! `tap` integration tests. No network unless `FASTBREW_TEST_NETWORK=1`: the
+//! remote is a local git repository cloned over `file://`.
 
 use std::path::Path;
 use std::process::Command;
 
+use fastbrew::config::Config;
 use fastbrew::platform::Host;
 use fastbrew::rubylite;
 use fastbrew::tap::{self, Tap};
 
 mod support;
-use support::{sandbox_config, skip_unless_sandbox};
+use support::{Sandbox, network_tests_enabled, sandbox_config, skip_unless_sandbox};
 
 const FOO_RB: &str = r#"class Foo < Formula
   desc "Test formula in a local tap"
@@ -227,4 +228,219 @@ fn tap_with_homebrew_formula_directory_and_aliases() {
     assert_eq!(aliases.get("foo-alias").map(String::as_str), Some("foo"));
 
     tap::untap(&cfg, "other/alt", false).expect("untap");
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end: a tap formula seen through the CLI
+// ---------------------------------------------------------------------------
+
+/// A formula with a `bottle do` block for the host tag whose `root_url` points
+/// at a host that does not resolve, so the install stops at the download.
+fn bottled_formula(tag: &str) -> String {
+    format!(
+        r#"class Bottled < Formula
+  desc "Tap formula that ships a bottle"
+  homepage "https://example.com/bottled"
+  url "https://example.com/bottled/bottled-2.0.0.tar.gz"
+  sha256 "5555555555555555555555555555555555555555555555555555555555555555"
+  license "MIT"
+
+  bottle do
+    root_url "https://bottles.invalid/v2/tiger/bottled"
+    sha256 cellar: :any_skip_relocation, {tag}: "6666666666666666666666666666666666666666666666666666666666666666"
+  end
+end
+"#
+    )
+}
+
+/// Build a git repository shaped like a tap around `Formula/bottled.rb`.
+fn make_bottled_remote(dir: &Path, tag: &str) {
+    std::fs::create_dir_all(dir.join("Formula")).expect("mkdir Formula");
+    std::fs::write(dir.join("Formula/bottled.rb"), bottled_formula(tag)).expect("write");
+    git(dir, &["init", "--initial-branch=main", "--quiet"]);
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "--quiet", "-m", "Add bottled"]);
+}
+
+#[test]
+fn cli_reads_a_tap_formula_end_to_end() {
+    let Some(sandbox) = Sandbox::new() else {
+        eprintln!("no cached Homebrew API file available; skipping");
+        return;
+    };
+    let tag = support::bottle_tag();
+    let remote = tempfile::tempdir().expect("tempdir");
+    make_bottled_remote(remote.path(), &tag);
+    let url = format!("file://{}", remote.path().display());
+
+    let out = sandbox.run(&["tap", "tiger/test", &url]);
+    assert!(
+        out.status.success(),
+        "tap failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("==> Tapping tiger/test"), "{stderr}");
+    assert!(stderr.contains("Tapped 1 formula ("), "{stderr}");
+
+    // --- info, by full name and by bare name ----------------------------
+    for reference in ["tiger/test/bottled", "bottled"] {
+        let info = sandbox.stdout(&["info", reference]);
+        assert!(
+            info.starts_with("==> tiger/test/bottled: stable 2.0.0 (bottled)\n"),
+            "{info}"
+        );
+        assert!(info.contains("\nTap: tiger/test\n"), "{info}");
+        assert!(
+            info.contains(&format!("From: {url}/Formula/bottled.rb\n")),
+            "the From: line points at the tap's own file:\n{info}"
+        );
+        assert!(info.contains("\nLicense: MIT\n"), "{info}");
+    }
+
+    // --- search and tap-info --------------------------------------------
+    let search = sandbox.stdout(&["search", "bottled"]);
+    assert!(
+        search.lines().any(|l| l == "tiger/test/bottled"),
+        "{search}"
+    );
+    let tap_info = sandbox.stdout(&["tap-info", "tiger/test"]);
+    assert!(
+        tap_info.starts_with("tiger/test: Installed\n"),
+        "{tap_info}"
+    );
+    assert!(tap_info.contains("\n1 formula\n"), "{tap_info}");
+    assert!(tap_info.contains("\n==> Formulae\nbottled\n"), "{tap_info}");
+
+    // --- deps ------------------------------------------------------------
+    // The formula declares none, so both forms print nothing and succeed.
+    assert_eq!(sandbox.stdout(&["deps", "tiger/test/bottled"]), "");
+    assert_eq!(
+        sandbox.stdout(&["deps", "--tree", "tiger/test/bottled"]),
+        "tiger/test/bottled\n\n"
+    );
+
+    // --- the parsed bottle is what `ops::install` needs -------------------
+    let cfg = Config::for_test(sandbox.prefix.parent().expect("sandbox root"));
+    let t = Tap::parse("tiger/test").expect("parse");
+    let host_tag = Host::detect().bottle_tag();
+    let meta = fastbrew::api::taps::load_tap(&cfg, &t, &host_tag);
+    let entry = meta
+        .formula("bottled")
+        .expect("the tap carries it")
+        .expect("it parses")
+        .entry;
+    assert!(entry.has_bottle(), "a bottle for the host tag was found");
+    assert_eq!(
+        entry.bottle_checksum.as_deref(),
+        Some("6666666666666666666666666666666666666666666666666666666666666666")
+    );
+    assert_eq!(
+        entry.bottle_root_url.as_deref(),
+        Some("https://bottles.invalid/v2/tiger/bottled"),
+        "the `root_url` reaches `ops::install` on the entry"
+    );
+
+    // --- install: resolution succeeds, the download cannot ---------------
+    let out = sandbox.run(&["install", "tiger/test/bottled"]);
+    assert!(
+        !out.status.success(),
+        "an unreachable root_url cannot install"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("No available formula") && !stderr.contains("requires the tap"),
+        "the name resolved, so the failure is about the download:\n{stderr}"
+    );
+
+    // --- untap ------------------------------------------------------------
+    let out = sandbox.run(&["untap", "tiger/test"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = sandbox.run(&["info", "tiger/test/bottled"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("This command requires the tap tiger/test."),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn ambiguous_bare_names_list_every_tap() {
+    let Some(sandbox) = Sandbox::new() else {
+        eprintln!("no cached Homebrew API file available; skipping");
+        return;
+    };
+    let tag = support::bottle_tag();
+    let first = tempfile::tempdir().expect("tempdir");
+    let second = tempfile::tempdir().expect("tempdir");
+    make_bottled_remote(first.path(), &tag);
+    make_bottled_remote(second.path(), &tag);
+
+    for (name, dir) in [("aaa/one", first.path()), ("bbb/two", second.path())] {
+        let url = format!("file://{}", dir.display());
+        let out = sandbox.run(&["tap", name, &url]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // `TapFormulaAmbiguityError`.
+    let out = sandbox.run(&["info", "bottled"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Formulae found in multiple taps:"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("* aaa/one/bottled"), "{stderr}");
+    assert!(stderr.contains("* bbb/two/bottled"), "{stderr}");
+    assert!(
+        stderr.contains("Please use the fully-qualified name (e.g. aaa/one/bottled)"),
+        "{stderr}"
+    );
+
+    // The qualified name still works.
+    let info = sandbox.stdout(&["info", "bbb/two/bottled"]);
+    assert!(info.contains("\nTap: bbb/two\n"), "{info}");
+}
+
+#[test]
+fn taps_oven_sh_bun_and_reads_it() {
+    if !network_tests_enabled() {
+        eprintln!("set FASTBREW_TEST_NETWORK=1 to run network tests; skipping");
+        return;
+    }
+    let Some(sandbox) = Sandbox::new() else {
+        eprintln!("no cached Homebrew API file available; skipping");
+        return;
+    };
+    let out = sandbox.run(&["tap", "oven-sh/bun"]);
+    assert!(
+        out.status.success(),
+        "tap oven-sh/bun failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    for reference in ["oven-sh/bun/bun", "bun"] {
+        let info = sandbox.stdout(&["info", reference]);
+        assert!(info.starts_with("==> oven-sh/bun/bun: stable "), "{info}");
+        assert!(info.contains("\nTap: oven-sh/bun\n"), "{info}");
+        assert!(
+            info.contains("From: https://github.com/oven-sh/homebrew-bun/blob/HEAD/"),
+            "{info}"
+        );
+    }
+    let tap_info = sandbox.stdout(&["tap-info", "oven-sh/bun"]);
+    assert!(
+        tap_info.starts_with("oven-sh/bun: Installed\n"),
+        "{tap_info}"
+    );
 }
