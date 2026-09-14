@@ -45,7 +45,9 @@ pub fn with_writable<T>(
 #[serde(default)]
 pub struct BottleTab {
     pub homebrew_version: Option<String>,
-    pub changed_files: Vec<String>,
+    /// `None` when the key is absent: relocation then scans the whole keg for
+    /// text files instead of trusting a recorded list (`docs/COMPAT.md` 4).
+    pub changed_files: Option<Vec<String>>,
     pub linkage_files: Option<Vec<String>>,
     pub binary_relocation_files: Option<Vec<String>>,
     pub padded_prefix: Option<bool>,
