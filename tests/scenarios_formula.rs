@@ -1771,3 +1771,248 @@ end
         "each package is planned once:\n{both}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 10. Fixture bottles: a tap whose bottles are seeded into the cache
+// ---------------------------------------------------------------------------
+
+/// A formula in a fixture tap together with the bottle it points at.
+///
+/// The bottle is built here and copied straight into the download cache under
+/// the name `bottle::fetch` derives from its registry URL, so these tests pour
+/// a real archive through the real install pipeline without a network. Every
+/// fixture uses an `all` bottle, so nothing depends on the host's bottle tag.
+struct Fixture {
+    name: String,
+    version: String,
+    /// Regular files relative to the keg root.
+    files: Vec<(String, Vec<u8>)>,
+    /// Symlink entries `(path relative to the keg root, target)`. An empty
+    /// path makes the keg root itself a symlink.
+    links: Vec<(String, String)>,
+    /// `cellar:` of the bottle block. `any` makes the installer relocate.
+    cellar: &'static str,
+    /// `sh.brew.tab`'s `linkage_files`, which relocation reads.
+    linkage_files: Vec<String>,
+}
+
+/// Where the fixture bottles pretend to be served from.
+const FIXTURE_ROOT_URL: &str = "https://bottles.invalid/v2/review/fixtures";
+
+// Each test uses the parts of the builder its own bottle needs.
+#[allow(dead_code)]
+impl Fixture {
+    fn new(name: &str, version: &str) -> Fixture {
+        Fixture {
+            name: name.to_string(),
+            version: version.to_string(),
+            files: vec![(format!("bin/{name}"), b"#!/bin/sh\necho fixture\n".to_vec())],
+            links: Vec::new(),
+            cellar: "any_skip_relocation",
+            linkage_files: Vec::new(),
+        }
+    }
+
+    fn file(mut self, path: &str, body: &[u8]) -> Fixture {
+        self.files.push((path.to_string(), body.to_vec()));
+        self
+    }
+
+    fn no_files(mut self) -> Fixture {
+        self.files.clear();
+        self
+    }
+
+    fn link(mut self, path: &str, target: &str) -> Fixture {
+        self.links.push((path.to_string(), target.to_string()));
+        self
+    }
+
+    /// Make the installer relocate the keg, reading `path` as a Mach-O file.
+    fn relocates(mut self, path: &str) -> Fixture {
+        self.cellar = "any";
+        self.linkage_files.push(path.to_string());
+        self
+    }
+
+    /// Write the tap formula and seed the bottle; returns the full name.
+    fn publish(&self, sb: &Sandbox) -> String {
+        let formulae = sb
+            .prefix
+            .join("Library/Taps/review/homebrew-fixtures/Formula");
+        std::fs::create_dir_all(&formulae).expect("mkdir the fixture tap");
+        let tarball = self.build(sb);
+        let sha = fastbrew::cask::download::file_sha256(&tarball).expect("sha256 of the bottle");
+
+        let class: String = self
+            .name
+            .chars()
+            .enumerate()
+            .map(|(i, c)| if i == 0 { c.to_ascii_uppercase() } else { c })
+            .collect();
+        std::fs::write(
+            formulae.join(format!("{}.rb", self.name)),
+            format!(
+                r#"class {class} < Formula
+  desc "Fixture formula for the scenario tests"
+  homepage "https://example.invalid/{name}"
+  url "https://example.invalid/{name}-{version}.tar.gz"
+  version "{version}"
+  sha256 "{zeros}"
+
+  bottle do
+    root_url "{FIXTURE_ROOT_URL}"
+    sha256 cellar: :{cellar}, all: "{sha}"
+  end
+end
+"#,
+                name = self.name,
+                version = self.version,
+                cellar = self.cellar,
+                zeros = "0".repeat(64),
+            ),
+        )
+        .expect("write the fixture formula");
+
+        let blob_url = format!("{FIXTURE_ROOT_URL}/{}/blobs/sha256:{sha}", self.name);
+        std::fs::copy(
+            &tarball,
+            cached_download(
+                sb,
+                &blob_url,
+                &format!("{}--{}.all.bottle.tar.gz", self.name, self.version),
+            ),
+        )
+        .expect("seed the bottle into the cache");
+
+        let tab = serde_json::json!({
+            "changed_files": [],
+            "linkage_files": self.linkage_files,
+            "runtime_dependencies": [],
+        });
+        let manifest = serde_json::json!({
+            "manifests": [{
+                "annotations": {
+                    "org.opencontainers.image.ref.name": format!("{}.all", self.version),
+                    "sh.brew.bottle.digest": sha,
+                    "sh.brew.tab": tab.to_string(),
+                },
+            }],
+        });
+        let manifest_url = format!(
+            "{FIXTURE_ROOT_URL}/{}/manifests/{}",
+            self.name, self.version
+        );
+        std::fs::write(
+            cached_download(
+                sb,
+                &manifest_url,
+                &format!("{}-{}.bottle_manifest.json", self.name, self.version),
+            ),
+            manifest.to_string(),
+        )
+        .expect("seed the manifest into the cache");
+
+        format!("review/fixtures/{}", self.name)
+    }
+
+    /// `<name>/<version>/...` as a gzipped tar.
+    fn build(&self, sb: &Sandbox) -> PathBuf {
+        use std::io::Write;
+
+        let dir = sb.home.join("fixtures");
+        std::fs::create_dir_all(&dir).expect("mkdir fixtures");
+        let path = dir.join(format!("{}--{}.tar.gz", self.name, self.version));
+        let out = std::fs::File::create(&path).expect("create the fixture bottle");
+        let enc = flate2::write::GzEncoder::new(out, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(enc);
+
+        let root = format!("{}/{}", self.name, self.version);
+        let directory = |builder: &mut tar::Builder<_>, path: String| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Directory);
+            h.set_mode(0o755);
+            h.set_size(0);
+            h.set_mtime(1_700_000_000);
+            h.set_cksum();
+            builder.append_data(&mut h, path, std::io::empty()).unwrap();
+        };
+        directory(&mut builder, format!("{}/", self.name));
+        if !self.files.is_empty() {
+            directory(&mut builder, format!("{root}/"));
+        }
+        for (rel, body) in &self.files {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_mode(0o755);
+            h.set_size(body.len() as u64);
+            h.set_mtime(1_700_000_000);
+            h.set_cksum();
+            builder
+                .append_data(&mut h, format!("{root}/{rel}"), body.as_slice())
+                .unwrap();
+        }
+        for (rel, target) in &self.links {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_mode(0o777);
+            h.set_size(0);
+            h.set_mtime(1_700_000_000);
+            let path = if rel.is_empty() {
+                root.clone()
+            } else {
+                format!("{root}/{rel}")
+            };
+            builder.append_link(&mut h, path, target).unwrap();
+        }
+        builder
+            .into_inner()
+            .unwrap()
+            .finish()
+            .unwrap()
+            .flush()
+            .unwrap();
+        path
+    }
+}
+
+/// The cache path `bottle::fetch` stores `url` at.
+fn cached_download(sb: &Sandbox, url: &str, basename: &str) -> PathBuf {
+    let dir = sb.cache.join("downloads");
+    std::fs::create_dir_all(&dir).expect("mkdir downloads");
+    dir.join(format!(
+        "{}--{}",
+        fastbrew::bottle::fetch::url_hash(url),
+        fastbrew::bottle::fetch::safe_filename(basename)
+    ))
+}
+
+/// A tarball whose `<name>/<version>` entry is a symlink passes `is_dir`, so
+/// without an `lstat` check it becomes the keg and every later write — the
+/// receipt first of all — lands wherever it points.
+#[test]
+fn a_bottle_whose_keg_root_is_a_symlink_is_refused() {
+    let sb = sandbox_or_skip!();
+
+    let victim = sb.home.join("outside-keg");
+    std::fs::create_dir_all(victim.join("bin")).unwrap();
+    let kept = "{\"user_data\":\"must not be overwritten\"}";
+    std::fs::write(victim.join("INSTALL_RECEIPT.json"), kept).unwrap();
+
+    let full = Fixture::new("fbescaperoot", "1.0")
+        .no_files()
+        .link("", victim.to_str().unwrap())
+        .publish(&sb);
+
+    let text = fails(&sb, &["install", &full]);
+    assert!(text.contains("would land outside the Cellar"), "{text}");
+    assert!(
+        std::fs::symlink_metadata(keg(&sb, "fbescaperoot", "1.0")).is_err(),
+        "no keg was promoted into the Cellar"
+    );
+    assert_eq!(
+        std::fs::read_to_string(victim.join("INSTALL_RECEIPT.json")).unwrap(),
+        kept,
+        "nothing outside the Cellar was written"
+    );
+}
