@@ -27,13 +27,21 @@ fn kind_of(formula: bool, cask: bool) -> Kind {
 }
 
 /// Split names into resolved formulae and casks.
-fn partition(ctx: &Ctx, names: &[String], kind: Kind) -> Result<(Vec<String>, Vec<String>)> {
+///
+/// The resolved formula entry is what reaches `ops`, not its bare name:
+/// re-resolving `user/repo/jq` downstream would give core's `jq`, because the
+/// API loader runs before any tap loader.
+fn partition(
+    ctx: &Ctx,
+    names: &[String],
+    kind: Kind,
+) -> Result<(Vec<crate::model::FormulaEntry>, Vec<String>)> {
     let index = ctx.index()?;
     let mut formulae = Vec::new();
     let mut casks = Vec::new();
     for name in names {
         match resolve::resolve(&ctx.cfg, index, name, kind)? {
-            resolve::Resolved::Formula(f) => formulae.push(f.name),
+            resolve::Resolved::Formula(f) => formulae.push(f),
             resolve::Resolved::Cask(c) => casks.push(c.token),
         }
     }
@@ -112,7 +120,7 @@ pub fn install(ctx: &Ctx, args: &InstallArgs, reinstall: bool) -> Result<()> {
             head: args.head,
             keep_tmp: args.keep_tmp,
         };
-        crate::ops::install::install_formulae(&ctx.cfg, index, &formulae, &opts)?;
+        crate::ops::install::install_formulae_entries(&ctx.cfg, index, &formulae, &opts)?;
     }
     if !casks.is_empty() {
         let opts = cask_options(ctx, args, reinstall);
@@ -318,13 +326,22 @@ pub fn link(ctx: &Ctx, args: &LinkArgs, link_it: bool) -> Result<()> {
         verbose: ctx.verbose,
     };
     for name in &args.names {
-        // A keg may outlive its formula; fall back to the rack's name.
-        let formula = resolve::resolve_formula(&ctx.cfg, index, name).ok();
+        // A keg may outlive its formula; fall back to the rack's name. The
+        // rack's own receipt picks the tap (`Formulary.from_rack`).
+        let formula = resolve::resolve_installed(&ctx.cfg, index, name).ok();
         let short = formula
             .as_ref()
             .map(|f| f.name.clone())
             .unwrap_or_else(|| name.rsplit('/').next().unwrap_or(name).to_string());
         let keg = latest_keg(ctx, &short)?;
+        // Linking and unlinking rewrite the prefix records of this rack, so
+        // they take the same lock every other destructive operation does. A
+        // `--dry-run` only lists, so it stays lock-free.
+        let _lock = if args.dry_run {
+            None
+        } else {
+            Some(crate::keg::lock::lock_formula(&ctx.cfg, &short)?)
+        };
 
         if !link_it {
             if args.dry_run {
@@ -498,7 +515,8 @@ pub fn pin(ctx: &Ctx, args: &PinArgs, pin_it: bool) -> Result<()> {
     }
     let index = ctx.index()?;
     for name in &args.names {
-        let formula = resolve::resolve_formula(&ctx.cfg, index, name)?;
+        // Pinning acts on an installed keg, so the rack's receipt picks the tap.
+        let formula = resolve::resolve_installed(&ctx.cfg, index, name)?;
         let full = formula.full_name();
         let pinned = crate::keg::is_pinned(&ctx.cfg, &formula.name);
         // `Formula#pinnable?`: there has to be a keg to pin.
@@ -532,7 +550,7 @@ pub struct PostinstallArgs {
 pub fn postinstall(ctx: &Ctx, args: &PostinstallArgs) -> Result<()> {
     let index = ctx.index()?;
     for name in &args.names {
-        let formula = resolve::resolve_formula(&ctx.cfg, index, name)?;
+        let formula = resolve::resolve_installed(&ctx.cfg, index, name)?;
         let keg = latest_keg(ctx, &formula.name)?;
         crate::ops::postinstall::run_post_install(&ctx.cfg, &formula, &keg)?;
     }

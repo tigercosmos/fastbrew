@@ -148,27 +148,26 @@ pub fn runtime_dependencies(
     formula: &FormulaEntry,
     planned: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<RuntimeDependency> {
-    let declared: Vec<String> = deps::direct_dependencies(cfg, formula, DepOptions::default())
+    let declared: Vec<String> =
+        deps::entry_dependency_names(index, formula, DepOptions::default(), true)
+            .into_iter()
+            .map(|d| deps::short_name(&d).to_string())
+            .collect();
+    let closure = deps::recursive_dependencies(cfg, index, formula, DepOptions::default())
+        .unwrap_or_default();
+    closure
         .into_iter()
-        .map(|d| d.name)
-        .collect();
-    deps::recursive_dependency_names(index, &formula.name, DepOptions::default())
-        .into_iter()
-        .filter_map(|name| {
+        .filter_map(|entry| {
+            let name = entry.name.clone();
             let pkg_version = planned(&name)
                 .or_else(|| crate::keg::latest_keg(cfg, &name).map(|k| k.version.to_string()))
-                .or_else(|| index.formula_pkg_version(&name))?;
-            let entry = index.formula(&name);
-            let full_name = entry
-                .as_ref()
-                .map(FormulaEntry::full_name)
-                .unwrap_or_else(|| name.clone());
+                .or_else(|| Some(entry.pkg_version()).filter(|v| !v.is_empty()))?;
             let (version, revision) = split_pkg_version(&pkg_version);
             Some(RuntimeDependency {
-                full_name,
+                full_name: entry.full_name(),
                 version,
                 revision,
-                bottle_rebuild: Some(entry.as_ref().map(|e| e.bottle_rebuild).unwrap_or(0)),
+                bottle_rebuild: Some(entry.bottle_rebuild),
                 pkg_version,
                 declared_directly: declared.contains(&name),
                 compatibility_version: None,

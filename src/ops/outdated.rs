@@ -6,6 +6,7 @@ use crate::api::index::Index;
 use crate::config::Config;
 use crate::error::Result;
 use crate::keg::Keg;
+use crate::model::FormulaEntry;
 use crate::version::PkgVersion;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,16 +46,31 @@ pub fn pinned_version(cfg: &Config, name: &str) -> Option<String> {
 /// Port of `Formula#outdated_kegs`: the installed kegs that make `name`
 /// outdated, or an empty vector when it is current.
 pub fn outdated_kegs(cfg: &Config, index: &Index, name: &str) -> Vec<Keg> {
-    let kegs = crate::keg::installed_kegs(cfg, name);
-    if kegs.is_empty() {
-        return vec![];
-    }
     let Some(i) = index.formula_index(name) else {
         // Not in the API any more: nothing to upgrade to.
         return vec![];
     };
-    let latest_pkg_version = PkgVersion::parse(index.formula_pkg_version_at(i));
-    let latest_scheme = index.formula_version_scheme_at(i);
+    outdated_kegs_against(
+        cfg,
+        name,
+        index.formula_pkg_version_at(i),
+        index.formula_version_scheme_at(i),
+    )
+}
+
+/// `Formula#outdated_kegs` for a *resolved* entry, which is the only way to
+/// judge a formula installed from a tap: the core index either does not know
+/// the name or knows a different formula by it.
+pub fn outdated_kegs_for(cfg: &Config, entry: &FormulaEntry) -> Vec<Keg> {
+    outdated_kegs_against(cfg, &entry.name, &entry.pkg_version(), entry.version_scheme)
+}
+
+fn outdated_kegs_against(cfg: &Config, name: &str, latest: &str, latest_scheme: u32) -> Vec<Keg> {
+    let kegs = crate::keg::installed_kegs(cfg, name);
+    if kegs.is_empty() {
+        return vec![];
+    }
+    let latest_pkg_version = PkgVersion::parse(latest);
     if latest_pkg_version.version.as_str().is_empty() {
         return vec![];
     }
@@ -90,6 +106,11 @@ pub fn outdated_kegs(cfg: &Config, index: &Index, name: &str) -> Vec<Keg> {
     all
 }
 
+/// Outdated formulae among `names`, or among everything installed.
+///
+/// Each rack is resolved through [`crate::resolve::resolve_installed`], so a
+/// keg poured from a third-party tap is compared against that tap's formula
+/// and not against a core formula that happens to share the name.
 pub fn outdated_formulae(
     cfg: &Config,
     index: &Index,
@@ -101,13 +122,29 @@ pub fn outdated_formulae(
     };
     let mut out = Vec::new();
     for name in candidates {
-        let kegs = outdated_kegs(cfg, index, &name);
+        // The core index answers for almost every rack without touching a
+        // tap; only a keg whose receipt names a third-party tap pays for the
+        // tap lookup. A rack the API no longer knows has nothing to upgrade to.
+        let entry = match crate::resolve::installed_tap(cfg, &name) {
+            Some(tap) => {
+                match crate::resolve::resolve_formula(cfg, index, &format!("{tap}/{name}")) {
+                    Ok(entry) => entry,
+                    Err(_) => continue,
+                }
+            }
+            None => match index.formula(&name) {
+                Some(entry) => entry,
+                None => continue,
+            },
+        };
+        let kegs = outdated_kegs_for(cfg, &entry);
         if kegs.is_empty() {
             continue;
         }
-        let Some(current_version) = index.formula_pkg_version(&name) else {
+        let current_version = entry.pkg_version();
+        if current_version.is_empty() {
             continue;
-        };
+        }
         out.push(OutdatedFormula {
             installed_versions: kegs.iter().map(|k| k.version.to_string()).collect(),
             current_version,

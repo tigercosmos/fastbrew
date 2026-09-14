@@ -51,6 +51,10 @@ pub struct Item {
     pub existing: Vec<Keg>,
     /// Whether one of `existing` was linked before this run started.
     pub was_linked: bool,
+    /// Rack names of this formula's direct runtime dependencies, as resolved.
+    /// Items are poured in dependency order, so a failure propagates through
+    /// these alone.
+    pub dependency_names: Vec<String>,
 }
 
 impl Item {
@@ -213,8 +217,12 @@ pub fn is_satisfied(cfg: &Config, formula: &FormulaEntry) -> bool {
 }
 
 /// `Formula#outdated?` for a dependency already on disk.
-pub fn is_outdated(cfg: &Config, index: &Index, name: &str) -> bool {
-    !crate::ops::outdated::outdated_kegs(cfg, index, name).is_empty()
+///
+/// The entry decides the current version: a formula installed from a tap is
+/// not in the core index, and comparing it against a core formula of the same
+/// name would be wrong.
+pub fn is_outdated(cfg: &Config, entry: &FormulaEntry) -> bool {
+    !crate::ops::outdated::outdated_kegs_for(cfg, entry).is_empty()
 }
 
 /// `FormulaInstaller#check_conflicts`: refuse to install when a formula this
@@ -348,12 +356,7 @@ fn optlinked_version(cfg: &Config, name: &str) -> Option<String> {
 /// Decide what to print (and whether to install) for a requested formula that
 /// may already be installed. Port of `Homebrew::Install.install_formula?`,
 /// restricted to the stable-bottle cases fastbrew handles.
-pub fn already_installed(
-    cfg: &Config,
-    index: &Index,
-    formula: &FormulaEntry,
-    only_dependencies: bool,
-) -> Already {
+pub fn already_installed(cfg: &Config, formula: &FormulaEntry, only_dependencies: bool) -> Already {
     let name = &formula.name;
     let kegs = keg::installed_kegs(cfg, name);
     if kegs.is_empty() {
@@ -362,7 +365,7 @@ pub fn already_installed(
     let full_name = formula.full_name();
     let pkg_version = formula.pkg_version();
     let pinned = keg::is_pinned(cfg, name);
-    let outdated = is_outdated(cfg, index, name);
+    let outdated = is_outdated(cfg, formula);
     let unpin = if pinned {
         format!("brew unpin {full_name} && ")
     } else {
@@ -446,39 +449,41 @@ pub fn already_installed(
     }
 }
 
-/// Build the dependency closure for `roots`, in install order, dropping
-/// dependencies that are already satisfied.
+/// Build the dependency closure of one resolved root, in install order.
 ///
-/// Outdated dependencies are included so they get upgraded, which is what
-/// Homebrew's `Dependency#satisfied?` does by comparing the installed version
-/// with the one the bottle tab pins.
+/// The traversal starts from the entry, not from its bare name, so a tap
+/// formula's `depends_on` list is honored and each dependency is resolved the
+/// way `Dependency#to_formula` would. An unresolvable required dependency is
+/// an error, never a silent omission.
 pub fn dependency_closure(
     cfg: &Config,
     index: &Index,
-    roots: &[FormulaEntry],
+    root: &FormulaEntry,
     ignore_dependencies: bool,
-) -> Vec<FormulaEntry> {
+) -> Result<Vec<FormulaEntry>> {
     if ignore_dependencies {
-        return vec![];
+        return Ok(vec![]);
     }
-    let mut seen: Vec<String> = Vec::new();
-    let mut out: Vec<FormulaEntry> = Vec::new();
-    for root in roots {
-        for name in deps::recursive_dependency_names(index, &root.name, DepOptions::default()) {
-            if seen.contains(&name) {
-                continue;
-            }
-            seen.push(name.clone());
-            let Some(entry) = index.formula(&name) else {
-                continue;
-            };
-            if is_satisfied(cfg, &entry) {
-                continue;
-            }
-            out.push(entry);
-        }
+    deps::recursive_dependencies(cfg, index, root, DepOptions::default())
+}
+
+/// What this run has to do about one dependency that the closure produced, or
+/// `None` when an installed keg already satisfies it.
+///
+/// Outdated dependencies are upgraded, which is what Homebrew's
+/// `Dependency#satisfied?` does by comparing the installed version with the
+/// one the bottle tab pins.
+pub fn dependency_action(cfg: &Config, entry: &FormulaEntry) -> Option<Action> {
+    if is_satisfied(cfg, entry) {
+        return None;
     }
-    out
+    if keg::installed_kegs(cfg, &entry.name).is_empty() {
+        return Some(Action::Install);
+    }
+    if !is_outdated(cfg, entry) || cfg.no_install_upgrade {
+        return None;
+    }
+    Some(Action::Upgrade)
 }
 
 /// Every name `<name>` can be reached by, for the "installed under another

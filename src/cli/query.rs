@@ -948,6 +948,11 @@ pub fn list(ctx: &Ctx, args: &ListArgs) -> Result<()> {
 /// then the tap metadata, then the keg receipt (the only source for a formula
 /// the API never had).
 fn installed_full_name(ctx: &Ctx, name: &str) -> String {
+    // The receipt is authoritative: a keg poured from `user/repo` keeps that
+    // name even when the core API carries a formula called the same thing.
+    if let Some(tap) = resolve::installed_tap(&ctx.cfg, name) {
+        return format!("{tap}/{name}");
+    }
     if let Ok(index) = ctx.index()
         && let Some(f) = index.formula(name)
     {
@@ -1438,56 +1443,26 @@ fn collect_deps(
     if runtime && let Some(names) = recorded_runtime_dependencies(ctx, root) {
         return names;
     }
-    // A tap formula is not in the index, so its own `depends_on` list comes
-    // from the parsed entry; the dependencies themselves are core formulae
-    // the index knows about.
-    if !index.has_formula(root)
-        && let Some(direct) = tap_direct_dependencies(ctx, root, opts)
-    {
-        if !recursive {
-            return direct;
-        }
-        let mut all: Vec<String> = Vec::new();
-        for d in direct {
-            for name in deps::recursive_dependency_names(index, &d, opts)
-                .into_iter()
-                .chain(std::iter::once(d))
-            {
-                if !all.contains(&name) {
-                    all.push(name);
-                }
-            }
-        }
-        return all;
-    }
+    // Start from the resolved entry, exactly as the install plan does: a tap
+    // formula is not in the index and carries its own `depends_on` list, and
+    // each dependency is then resolved the way `Dependency#to_formula` would.
+    let Some(entry) = root_entry(ctx, index, root) else {
+        return vec![];
+    };
     if recursive {
-        deps::recursive_dependency_names(index, root, opts)
+        deps::recursive_dependency_references(&ctx.cfg, index, &entry, opts)
     } else {
-        deps::direct_dependency_names(index, root, opts, true)
+        deps::entry_dependency_names(index, &entry, opts, true)
+            .iter()
+            .map(|d| deps::short_name(d).to_string())
+            .collect()
     }
 }
 
-/// `depends_on` of a tap formula, filtered like `deps::direct_dependency_names`.
-fn tap_direct_dependencies(ctx: &Ctx, name: &str, opts: DepOptions) -> Option<Vec<String>> {
-    let index = ctx.index().ok()?;
-    let entry = resolve::resolve_formula(&ctx.cfg, index, name).ok()?;
-    if entry.tap.is_empty() || entry.tap == "homebrew/core" {
-        return None;
-    }
-    Some(
-        entry
-            .dependencies()
-            .into_iter()
-            .filter(|d| {
-                (d.is_runtime()
-                    || (opts.include_build && d.is_build())
-                    || (opts.include_test && d.is_test()))
-                    && (!d.is_optional() || opts.include_optional)
-                    && (!d.is_recommended() || !opts.skip_recommended)
-            })
-            .map(|d| d.name)
-            .collect(),
-    )
+/// The entry a `deps`/`uses` root names: the tap its keg came from wins over a
+/// core formula of the same name (`Formulary.from_rack`).
+fn root_entry(ctx: &Ctx, index: &Index, name: &str) -> Option<crate::model::FormulaEntry> {
+    resolve::resolve_installed(&ctx.cfg, index, name).ok()
 }
 
 /// The runtime closure the installed keg recorded, in receipt order.
@@ -1589,10 +1564,12 @@ fn print_tree(
     seen: &mut Vec<String>,
     args: &DepsArgs,
 ) {
-    let dependables = if index.has_formula(name) {
-        deps::direct_dependency_names(index, name, opts, seen.is_empty())
-    } else {
-        tap_direct_dependencies(ctx, name, opts).unwrap_or_default()
+    let dependables = match root_entry(ctx, index, name) {
+        Some(entry) => deps::entry_dependency_names(index, &entry, opts, seen.is_empty())
+            .iter()
+            .map(|d| deps::short_name(d).to_string())
+            .collect(),
+        None => Vec::new(),
     };
     let max = dependables.len().saturating_sub(1);
     seen.push(name.to_string());

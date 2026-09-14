@@ -9,6 +9,7 @@ use crate::api::index::Index;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::keg;
+use crate::model::FormulaEntry;
 use crate::ops::install::{self, InstallOptions, Mode, pluralize};
 use crate::ops::outdated::{self, OutdatedFormula};
 use crate::output;
@@ -22,22 +23,27 @@ pub struct UpgradeOptions {
     pub greedy: bool,
 }
 
-/// Empty `names` means everything outdated.
+/// Empty `roots` means everything outdated.
+///
+/// The entries are the ones the CLI resolved, so `upgrade user/repo/jq` keeps
+/// meaning the tap's formula. Racks that were not named resolve through their
+/// receipt's tap.
 pub fn upgrade_formulae(
     cfg: &Config,
     index: &Index,
-    names: &[String],
+    roots: &[FormulaEntry],
     opts: &UpgradeOptions,
 ) -> Result<()> {
-    let named = !names.is_empty();
-    let outdated = outdated::outdated_formulae(cfg, index, Some(names))?;
+    let named = !roots.is_empty();
+    let names: Vec<String> = roots.iter().map(|f| f.name.clone()).collect();
+    let outdated = outdated::outdated_formulae(cfg, index, Some(&names))?;
 
     // `ofail`ed blocks: Homebrew prints them and then exits 1. Collecting them
     // lets fastbrew reproduce both the text and the exit status through one
     // `Result`, without printing anything twice.
     let mut failures: Vec<String> = Vec::new();
     if named {
-        failures.extend(report_not_outdated(cfg, index, names, opts));
+        failures.extend(report_not_outdated(cfg, roots, opts));
     }
     if outdated.is_empty() {
         return finish(failures);
@@ -90,6 +96,18 @@ pub fn upgrade_formulae(
     }
 
     for formula in &upgradeable {
+        // The formula to upgrade to: the entry the user named, else the one
+        // this rack's receipt points at.
+        let entry = match roots.iter().find(|r| r.name == formula.name) {
+            Some(root) => root.clone(),
+            None => match crate::resolve::resolve_installed(cfg, index, &formula.name) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    failures.push(format!("{}: {e}", formula.name));
+                    continue;
+                }
+            },
+        };
         if !opts.quiet {
             output::ohai(&format!("Upgrading {}", formula.name));
             // `Upgrade.print_upgrade_message` joins the (empty) option list
@@ -107,7 +125,7 @@ pub fn upgrade_formulae(
         let result = install::install_formulae_with(
             cfg,
             index,
-            std::slice::from_ref(&formula.name),
+            std::slice::from_ref(&entry),
             &install_opts,
             Mode { upgrade: true },
         );
@@ -132,15 +150,11 @@ fn finish(failures: Vec<String>) -> Result<()> {
 
 /// `cmd/upgrade.rb`: named formulae that are not outdated get a notice, and a
 /// name that is not installed at all is an `ofail`.
-fn report_not_outdated(
-    cfg: &Config,
-    index: &Index,
-    names: &[String],
-    opts: &UpgradeOptions,
-) -> Vec<String> {
+fn report_not_outdated(cfg: &Config, roots: &[FormulaEntry], opts: &UpgradeOptions) -> Vec<String> {
     let mut failures = Vec::new();
-    for name in names {
-        if !outdated::outdated_kegs(cfg, index, name).is_empty() {
+    for formula in roots {
+        let name = &formula.name;
+        if !outdated::outdated_kegs_for(cfg, formula).is_empty() {
             continue;
         }
         match keg::latest_keg(cfg, name) {

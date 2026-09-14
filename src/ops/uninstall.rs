@@ -13,6 +13,7 @@ use crate::deps;
 use crate::error::{Error, Result};
 use crate::keg::link::{LinkOptions, remove_records, unlink};
 use crate::keg::{self, Keg};
+use crate::model::FormulaEntry;
 use crate::ops::install::pluralize;
 use crate::output;
 use crate::resolve::to_sentence;
@@ -24,21 +25,25 @@ pub struct UninstallOptions {
     pub dry_run: bool,
 }
 
+/// Uninstall already-resolved formulae.
+///
+/// The entries decide which rack each reference means, so `user/repo/jq` never
+/// removes a core `jq`; a formula that is no longer in the API resolves from
+/// its own keg (`FromKegLoader`).
 pub fn uninstall_formulae(
     cfg: &Config,
     index: &Index,
-    names: &[String],
+    targets: &[FormulaEntry],
     opts: &UninstallOptions,
 ) -> Result<()> {
-    // Accept names of formulae that are no longer in the API: resolution falls
-    // back to the rack on disk.
+    let names: Vec<String> = targets.iter().map(FormulaEntry::full_name).collect();
     let mut racks: Vec<(String, Vec<Keg>)> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
-    for reference in names {
-        let name = canonical_installed_name(cfg, index, reference);
+    for target in targets {
+        let name = canonical_installed_name(cfg, index, target);
         let kegs = keg::installed_kegs(cfg, &name);
         if kegs.is_empty() {
-            missing.push(reference.clone());
+            missing.push(target.full_name());
             continue;
         }
         let selected = if opts.force {
@@ -72,7 +77,7 @@ pub fn uninstall_formulae(
             return Err(Error::user(dependents_message(
                 &required,
                 &dependents,
-                names,
+                &names,
             )));
         }
     }
@@ -89,6 +94,9 @@ pub fn uninstall_formulae(
                 );
                 continue;
             }
+            // `--force` deletes every keg in the rack, so it needs the rack's
+            // lock just as much as the single-keg path does.
+            let _lock = keg::lock::lock_formula(cfg, name)?;
             println!(
                 "Uninstalling {}... ({})",
                 rack.file_name().unwrap_or_default().to_string_lossy(),
@@ -210,12 +218,17 @@ fn warn_about_leftover_config(cfg: &Config, index: &Index, name: &str) {
     ));
 }
 
-/// The canonical rack name for a user-supplied reference, accepting formulae
-/// that are no longer in the API.
-fn canonical_installed_name(cfg: &Config, index: &Index, reference: &str) -> String {
-    let bare = deps::short_name(reference).to_string();
+/// The rack a resolved formula lives in: its own name, or the alias, rename or
+/// oldname the keg was installed under (`Formula#possible_names`).
+fn canonical_installed_name(cfg: &Config, index: &Index, formula: &FormulaEntry) -> String {
+    let bare = formula.name.clone();
     if cfg.rack(&bare).is_dir() {
         return bare;
+    }
+    for oldname in &formula.oldnames {
+        if cfg.rack(oldname).is_dir() {
+            return oldname.clone();
+        }
     }
     if let Some(target) = index.formula_alias(&bare)
         && cfg.rack(&target).is_dir()
@@ -369,10 +382,16 @@ pub fn autoremove(cfg: &Config, index: &Index, dry_run: bool) -> Result<()> {
     if dry_run {
         return Ok(());
     }
+    // Resolve against the tap each keg's receipt records, so a rack installed
+    // from a third-party tap is removed as that formula.
+    let targets: Vec<crate::model::FormulaEntry> = removable
+        .iter()
+        .filter_map(|name| crate::resolve::resolve_installed(cfg, index, name).ok())
+        .collect();
     uninstall_formulae(
         cfg,
         index,
-        &removable,
+        &targets,
         &UninstallOptions {
             force: false,
             ignore_dependencies: true,

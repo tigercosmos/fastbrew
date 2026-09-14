@@ -63,46 +63,70 @@ pub fn pluralize(stem: &str, count: usize) -> String {
     format!("{count} {stem}{suffix}")
 }
 
-/// Plan and execute installation of `names` (formula references).
+/// Resolve `names` and install them.
+///
+/// Kept for callers that only have a reference to work from (the cask
+/// installer's `depends_on formula:`); everything that has already resolved a
+/// formula passes the entry to [`install_formulae_entries`] instead, so an
+/// explicitly tapped name is never re-resolved to a core formula.
 pub fn install_formulae(
     cfg: &Config,
     index: &Index,
     names: &[String],
     opts: &InstallOptions,
 ) -> Result<()> {
-    install_formulae_with(cfg, index, names, opts, Mode::default())
+    let mut roots: Vec<FormulaEntry> = Vec::new();
+    for name in names {
+        roots.push(resolve::resolve_formula(cfg, index, name)?);
+    }
+    install_formulae_entries(cfg, index, &roots, opts)
 }
 
-/// `install_formulae` with the extra [`Mode`] knobs `upgrade` needs.
+/// Plan and execute installation of already-resolved formulae.
+pub fn install_formulae_entries(
+    cfg: &Config,
+    index: &Index,
+    roots: &[FormulaEntry],
+    opts: &InstallOptions,
+) -> Result<()> {
+    install_formulae_with(cfg, index, roots, opts, Mode::default())
+}
+
+/// `install_formulae_entries` with the extra [`Mode`] knobs `upgrade` needs.
 pub fn install_formulae_with(
     cfg: &Config,
     index: &Index,
-    names: &[String],
+    roots: &[FormulaEntry],
     opts: &InstallOptions,
     mode: Mode,
 ) -> Result<()> {
-    let mut roots: Vec<FormulaEntry> = Vec::new();
-    for name in names {
-        let formula = resolve::resolve_formula(cfg, index, name)?;
-        if let Some(message) = plan::check_deprecate_disable(&formula, opts.force)? {
+    for formula in roots {
+        if let Some(message) = plan::check_deprecate_disable(formula, opts.force)? {
             output::opoo(&message);
         }
-        roots.push(formula);
     }
 
-    let plan = build_plan(cfg, index, &roots, opts, mode)?;
-    if plan.items.is_empty() {
-        // Everything was already installed; the warnings are already printed.
-        return finish_run(cfg, index, &plan, opts);
-    }
+    // Planning only reads: no receipt is written and no lock is taken, so
+    // `--dry-run` leaves the prefix exactly as it found it.
+    let plan = build_plan(cfg, index, roots, opts, mode)?;
 
     if opts.dry_run {
         print_dry_run(cfg, &plan, opts, mode);
         return Ok(());
     }
 
-    // 3. Take formula locks for everything in the plan.
-    let _locks = take_locks(cfg, &plan)?;
+    // 3. Take formula locks for everything this run touches, including the
+    // racks whose receipt only needs its `installed_on_request` flag flipped.
+    let locks = take_locks(cfg, &plan)?;
+    for name in &plan.mark_on_request {
+        mark_installed_on_request(cfg, name);
+    }
+    if plan.items.is_empty() {
+        // Everything was already installed; the warnings are already printed.
+        drop(locks);
+        return finish_run(cfg, index, &plan, opts);
+    }
+    let _locks = locks;
 
     // 4. Fetch every manifest and blob concurrently.
     let downloads = fetch_plan(cfg, &plan, opts)?;
@@ -131,7 +155,7 @@ pub fn install_formulae_with(
             failed.insert(item.name().to_string());
             continue;
         }
-        if depends_on_failed(index, item, &failed) {
+        if depends_on_failed(item, &failed) {
             output::onoe(&format!(
                 "{}: skipped because a dependency failed to install",
                 item.name()
@@ -174,7 +198,9 @@ pub fn install_formulae_with(
     }
 
     // `Homebrew::Install.finish_installation` cleans up first and displays the
-    // recorded caveats last.
+    // recorded caveats last. Cleanup takes the same formula locks to remove an
+    // old keg, so this run has to let go of them first.
+    drop(_locks);
     finish_run(cfg, index, &plan, opts)?;
     print_messages(&messages);
 
@@ -207,11 +233,17 @@ fn print_dry_run(cfg: &Config, plan: &Plan, opts: &InstallOptions, mode: Mode) {
     } else {
         "install"
     };
+    // In the order the user named them, and once each: a formula that is both
+    // requested and another root's dependency is one item, not two.
     let requested: Vec<String> = plan
-        .items
+        .roots
         .iter()
-        .filter(|i| i.requested)
-        .map(|i| i.name().to_string())
+        .filter_map(|root| {
+            plan.items
+                .iter()
+                .find(|i| i.requested && i.formula.full_name() == *root)
+                .map(|i| i.name().to_string())
+        })
         .collect();
     if !requested.is_empty() {
         output::ohai(&format!(
@@ -263,26 +295,22 @@ fn dry_run_description(cfg: &Config, item: &Item) -> String {
 pub fn fetch_formulae(
     cfg: &Config,
     index: &Index,
-    names: &[String],
+    roots: &[FormulaEntry],
     with_deps: bool,
     force: bool,
 ) -> Result<()> {
     let mut entries: Vec<FormulaEntry> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for name in names {
-        let formula = resolve::resolve_formula(cfg, index, name)?;
+    for formula in roots {
         if with_deps {
-            for dep in deps::recursive_dependency_names(index, &formula.name, DepOptions::default())
-            {
-                if seen.insert(dep.clone())
-                    && let Some(entry) = index.formula(&dep)
-                {
-                    entries.push(entry);
+            for dep in deps::recursive_dependencies(cfg, index, formula, DepOptions::default())? {
+                if seen.insert(dep.full_name()) {
+                    entries.push(dep);
                 }
             }
         }
-        if seen.insert(formula.name.clone()) {
-            entries.push(formula);
+        if seen.insert(formula.full_name()) {
+            entries.push(formula.clone());
         }
     }
 
@@ -316,11 +344,18 @@ pub fn fetch_formulae(
 // --------------------------------------------------------------- planning
 
 /// Everything one `install` run will do.
+///
+/// `items` is deduplicated and in dependency order: every formula appears at
+/// most once, after everything it depends on. A formula the user named stays a
+/// requested item even when another named formula depends on it.
 #[derive(Debug, Default)]
 pub struct Plan {
     pub items: Vec<Item>,
     /// Full names of the formulae the user asked for, in order.
     pub roots: Vec<String>,
+    /// Racks that are already installed at the wanted version but whose
+    /// receipt has to record the explicit request. Applied under the lock.
+    pub mark_on_request: Vec<String>,
 }
 
 impl Plan {
@@ -353,7 +388,7 @@ fn build_plan(
         roots: roots.iter().map(FormulaEntry::full_name).collect(),
         ..Default::default()
     };
-    let mut wanted: Vec<FormulaEntry> = Vec::new();
+    let mut wanted: Vec<(FormulaEntry, Action)> = Vec::new();
 
     for root in roots {
         let action = if opts.reinstall {
@@ -361,71 +396,77 @@ fn build_plan(
         } else if mode.upgrade {
             Action::Upgrade
         } else {
-            match plan::already_installed(cfg, index, root, opts.only_dependencies) {
+            match plan::already_installed(cfg, root, opts.only_dependencies) {
                 Already::NotInstalled => Action::Install,
                 Already::Outdated => Action::Upgrade,
                 Already::Installed { notice } => {
                     if !opts.quiet {
                         notice.print();
                     }
-                    // Homebrew still records the explicit request.
-                    mark_installed_on_request(cfg, &root.name);
+                    // Homebrew still records the explicit request, but only
+                    // once the run holds this rack's lock.
+                    plan.mark_on_request.push(root.name.clone());
                     continue;
                 }
             }
         };
         plan::check_conflicts(cfg, root)?;
-        wanted.push(root.clone());
+        wanted.push((root.clone(), action));
+    }
+
+    // One ordered, deduplicated list: each requested formula is preceded by
+    // the dependencies this run has to install for it, and a formula that is
+    // both requested and another root's dependency appears exactly once, as
+    // the requested item.
+    for (root, action) in &wanted {
+        let root_name = root.full_name();
+        for entry in plan::dependency_closure(cfg, index, root, opts.ignore_dependencies)? {
+            let Some(dep_action) = plan::dependency_action(cfg, &entry) else {
+                continue;
+            };
+            // `installed_on_request` stays true when an existing receipt says so.
+            let on_request = deps::installed_on_request(cfg, &entry.name);
+            let item = make_item(cfg, index, &entry, dep_action, Some(&root_name), on_request)?;
+            add_item(&mut plan.items, item);
+        }
         if opts.only_dependencies {
             continue;
         }
-        plan.items.push(make_item(
+        let item = make_item(
             cfg,
+            index,
             root,
-            action,
+            *action,
             None,
             opts.on_request || opts.reinstall,
-        )?);
+        )?;
+        add_item(&mut plan.items, item);
     }
-
-    // Dependencies go first, in install order, each attributed to the first
-    // requested formula that needs it.
-    let closure = plan::dependency_closure(cfg, index, &wanted, opts.ignore_dependencies);
-    let mut dependency_items = Vec::new();
-    for entry in closure {
-        let installed = !keg::installed_kegs(cfg, &entry.name).is_empty();
-        let outdated = installed && plan::is_outdated(cfg, index, &entry.name);
-        if installed && !outdated {
-            continue;
-        }
-        if installed && outdated && cfg.no_install_upgrade {
-            continue;
-        }
-        let action = if outdated {
-            Action::Upgrade
-        } else {
-            Action::Install
-        };
-        let root = wanted
-            .iter()
-            .find(|w| {
-                deps::recursive_dependency_names(index, &w.name, DepOptions::default())
-                    .contains(&entry.name)
-            })
-            .map(FormulaEntry::full_name)
-            .unwrap_or_default();
-        // `installed_on_request` stays true when an existing receipt says so.
-        let on_request = deps::installed_on_request(cfg, &entry.name);
-        dependency_items.push(make_item(cfg, &entry, action, Some(&root), on_request)?);
-    }
-    let mut items = dependency_items;
-    items.append(&mut plan.items);
-    plan.items = items;
     Ok(plan)
+}
+
+/// Add `item` to the plan, or merge it into the entry already there.
+///
+/// The first occurrence fixes the position, which keeps the list in dependency
+/// order. A formula that first appeared as a dependency and is then named on
+/// the command line is promoted to a requested item, so the run does the work
+/// once and the receipt records the request.
+fn add_item(items: &mut Vec<Item>, item: Item) {
+    let Some(existing) = items.iter_mut().find(|i| i.name() == item.name()) else {
+        items.push(item);
+        return;
+    };
+    if item.requested && !existing.requested {
+        existing.requested = true;
+        existing.root = String::new();
+        existing.installed_on_request = true;
+        existing.action = item.action;
+    }
 }
 
 fn make_item(
     cfg: &Config,
+    index: &Index,
     formula: &FormulaEntry,
     action: Action,
     root: Option<&str>,
@@ -434,6 +475,11 @@ fn make_item(
     let bottle = plan::require_bottle(cfg, formula)?;
     let existing = keg::installed_kegs(cfg, &formula.name);
     let was_linked = existing.iter().any(|k| k.is_linked(cfg));
+    let dependency_names =
+        deps::entry_dependency_names(index, formula, DepOptions::default(), true)
+            .iter()
+            .map(|d| deps::short_name(d).to_string())
+            .collect();
     Ok(Item {
         cellar: formula.bottle_cellar_kind(),
         formula: formula.clone(),
@@ -444,11 +490,15 @@ fn make_item(
         installed_on_request,
         existing,
         was_linked,
+        dependency_names,
     })
 }
 
 /// `install/check.rb`: a formula the user asked for but that is already there
 /// still stops being "installed as a dependency".
+///
+/// This writes a receipt, so it only ever runs with the rack's formula lock
+/// held — never while planning, and never on a `--dry-run`.
 fn mark_installed_on_request(cfg: &Config, name: &str) {
     let Some(keg) = keg::linked_keg(cfg, name).or_else(|| keg::latest_keg(cfg, name)) else {
         return;
@@ -463,8 +513,16 @@ fn mark_installed_on_request(cfg: &Config, name: &str) {
     let _ = receipt.write(&keg.receipt_path());
 }
 
+/// `FormulaInstaller#lock`: one `<name>.formula.lock` per rack this run will
+/// write to, taken before the first byte is poured and held until the kegs are
+/// finished. Contention is `OperationInProgressError`.
 fn take_locks(cfg: &Config, plan: &Plan) -> Result<Vec<Lock>> {
-    let mut names: Vec<&str> = plan.items.iter().map(Item::name).collect();
+    let mut names: Vec<&str> = plan
+        .items
+        .iter()
+        .map(Item::name)
+        .chain(plan.mark_on_request.iter().map(String::as_str))
+        .collect();
     names.sort_unstable();
     names.dedup();
     names
@@ -744,13 +802,15 @@ fn should_link(cfg: &Config, item: &Item) -> bool {
     item.was_linked || plan::auto_link_versioned_keg_only(cfg, item)
 }
 
-fn depends_on_failed(index: &Index, item: &Item, failed: &HashSet<String>) -> bool {
+/// Whether a dependency of `item` failed earlier in this run.
+///
+/// Items are finished in dependency order and a skipped item joins `failed`
+/// itself, so checking the direct dependencies propagates transitively.
+fn depends_on_failed(item: &Item, failed: &HashSet<String>) -> bool {
     if failed.is_empty() {
         return false;
     }
-    deps::recursive_dependency_names(index, item.name(), DepOptions::default())
-        .iter()
-        .any(|d| failed.contains(d))
+    item.dependency_names.iter().any(|d| failed.contains(d))
 }
 
 fn print_install_header(item: &Item, opts: &InstallOptions, mode: Mode) {
