@@ -40,8 +40,9 @@ inside the same sandbox prefix (Homebrew 6, portable Ruby):
 | `outdated` | 275 ms | 4.1 ms |
 | `uses --installed openssl@3` | 311 ms | 4.1 ms |
 | `search ripgrep` | 394 ms | 10.2 ms |
-| `install jq` (downloads included) | about 4 s | 0.8 s |
-| `install jq` (bottles cached) | about 2 s | 0.03 s |
+| `install jq` (cold cache, downloads included) | 1.15 s | 0.55 s |
+| `install jq` (bottles cached) | 0.47 s | 0.03 s |
+| `uninstall jq oniguruma` | 0.38 s | under 0.01 s |
 
 The 15 MB package index is parsed once per `update` into a memory-mapped
 file; every query afterwards is a few microseconds of lookups.
