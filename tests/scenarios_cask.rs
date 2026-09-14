@@ -449,6 +449,404 @@ fn a_tap_qualified_cask_is_the_one_that_is_installed() {
     assert_eq!(env.stdout(&["list", "--cask"]), "");
 }
 
+// ------------------------------------------------------- cask edge cases
+
+/// `--appdir` on the command line beats `HOMEBREW_CASK_OPTS`, and the layers
+/// are recorded separately in the cask's `config.json` (`Cask::Config`).
+#[test]
+fn appdir_on_the_command_line_wins_over_the_environment() {
+    let env = env_or_skip!();
+    let token = "fastbrew-appdir";
+    let app = "FastbrewAppdir.app";
+    let elsewhere = env.sandbox.home.join("Elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("mkdir");
+
+    let url = fixture_url(token, "1.0");
+    let sha = env.seed_app_zip(&url, app, "1.0");
+    env.write_cask(token, &app_cask_rb(token, "1.0", &url, &sha, app, ""));
+
+    let out = env
+        .cmd()
+        .args([
+            "install",
+            "--cask",
+            &format!("--appdir={}", elsewhere.display()),
+            token,
+        ])
+        .output()
+        .expect("run fastbrew");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        elsewhere.join(app).is_dir(),
+        "the app went to {} instead",
+        env.appdir().display()
+    );
+    assert!(!env.appdir().join(app).exists());
+
+    // `config.json` keeps the default, the environment and the flag apart.
+    let config: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(env.caskroom(token).join(".metadata/config.json"))
+            .expect("config.json"),
+    )
+    .expect("json");
+    assert_eq!(
+        config["default"]["appdir"],
+        serde_json::json!("/Applications")
+    );
+    assert_eq!(
+        config["env"]["appdir"],
+        serde_json::json!(env.appdir().to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        config["explicit"]["appdir"],
+        serde_json::json!(elsewhere.to_string_lossy().as_ref())
+    );
+
+    // The uninstall follows the recorded directory, not the current one.
+    let out = env.run(&["uninstall", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!elsewhere.join(app).exists());
+}
+
+/// `--require-sha` (also via `HOMEBREW_CASK_OPTS`) refuses a cask that has no
+/// checksum to verify, before anything is downloaded.
+#[test]
+fn require_sha_refuses_a_cask_without_a_checksum() {
+    let env = env_or_skip!();
+    let token = "fastbrew-no-check";
+    let app = "FastbrewNoCheck.app";
+    let url = fixture_url(token, "1.0");
+    env.seed_app_zip(&url, app, "1.0");
+    // `sha256 :no_check` is the stanza Homebrew refuses under `--require-sha`.
+    env.write_cask(
+        token,
+        &app_cask_rb(token, "1.0", &url, ":no_check", app, ""),
+    );
+
+    // Without the switch it installs.
+    let out = env.run(&["install", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = env.run(&["uninstall", "--cask", token]);
+
+    // `cmd/install.rb` reports a cask failure as `<full name>: <error>`.
+    let expected = format!(
+        "Error: fixture/casks/{token}: Cask '{token}' does not have a sha256 checksum defined.\n\
+         This means you have the --require-sha option set, perhaps in your `$HOMEBREW_CASK_OPTS`."
+    );
+    // As a flag ...
+    let out = env.run(&["install", "--cask", "--require-sha", token]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)).contains(&expected),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // ... and out of the environment, where Homebrew documents it.
+    let out = env
+        .cmd()
+        .env(
+            "HOMEBREW_CASK_OPTS",
+            format!("--appdir={} --require-sha", env.appdir().display()),
+        )
+        .args(["install", "--cask", token])
+        .output()
+        .expect("run fastbrew");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)).contains(&expected),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!env.caskroom(token).exists(), "nothing may be staged");
+
+    // `--force` is Homebrew's escape hatch (`require_sha? && !force?`).
+    let out = env.run(&["install", "--cask", "--require-sha", "--force", token]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = env.run(&["uninstall", "--cask", token]);
+}
+
+/// `Cask::Installer#prelude` runs before anything is fetched: a macOS
+/// requirement the host cannot meet, and a conflicting cask, both stop there.
+#[test]
+fn requirements_and_conflicts_stop_the_install_before_staging() {
+    let env = env_or_skip!();
+
+    // --- depends_on macos ------------------------------------------------
+    let token = "fastbrew-too-new";
+    let app = "FastbrewTooNew.app";
+    let url = fixture_url(token, "1.0");
+    let sha = env.seed_app_zip(&url, app, "1.0");
+    // A macOS that does not exist yet, so the host can never satisfy it.
+    env.write_cask(
+        token,
+        &app_cask_rb(
+            token,
+            "1.0",
+            &url,
+            &sha,
+            app,
+            "  depends_on macos: \">= :golden_gate\"\n",
+        ),
+    );
+    let out = env.run(&["install", "--cask", token]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = support::strip_ansi(&String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stderr.contains(&format!(
+            "{token}: This cask does not run on macOS versions older than Golden Gate."
+        )),
+        "{stderr}"
+    );
+    assert!(!env.caskroom(token).exists(), "nothing may be staged");
+
+    // --- conflicts_with cask ---------------------------------------------
+    let first = "fastbrew-conflict-a";
+    let second = "fastbrew-conflict-b";
+    env.install_app_cask(first, "FastbrewConflictA.app", "1.0", "");
+
+    let url = fixture_url(second, "1.0");
+    let sha = env.seed_app_zip(&url, "FastbrewConflictB.app", "1.0");
+    env.write_cask(
+        second,
+        &app_cask_rb(
+            second,
+            "1.0",
+            &url,
+            &sha,
+            "FastbrewConflictB.app",
+            &format!("  conflicts_with cask: \"{first}\"\n"),
+        ),
+    );
+    let out = env.run(&["install", "--cask", second]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = support::strip_ansi(&String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stderr.contains(&format!("Cask '{second}' conflicts with '{first}'.")),
+        "{stderr}"
+    );
+    assert!(!env.caskroom(second).exists());
+    let _ = env.run(&["uninstall", "--cask", first]);
+}
+
+/// A `binary` artifact never silently replaces something already in `bin`
+/// (`Symlinked#link`'s `:conflict`), and the failed install purges itself.
+#[test]
+fn a_binary_artifact_will_not_overwrite_an_existing_file() {
+    let env = env_or_skip!();
+    let token = "fastbrew-binary-clash";
+    let app = "FastbrewBinaryClash.app";
+    let bin = env.sandbox.prefix.join("bin/clash");
+    std::fs::create_dir_all(bin.parent().expect("bin")).expect("mkdir bin");
+    std::fs::write(&bin, "#!/bin/sh\necho mine\n").expect("write the existing file");
+
+    let url = fixture_url(token, "1.0");
+    let sha = env.seed_app_zip(&url, app, "1.0");
+    env.write_cask(
+        token,
+        &app_cask_rb(
+            token,
+            "1.0",
+            &url,
+            &sha,
+            app,
+            "  binary \"#{appdir}/FastbrewBinaryClash.app/Contents/MacOS/demo\", target: \"clash\"\n",
+        ),
+    );
+
+    let out = env.run(&["install", "--cask", token]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = support::strip_ansi(&String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stderr.contains(&format!(
+            "It seems there is already a Binary at '{}'.",
+            bin.display()
+        )),
+        "{stderr}"
+    );
+    // The file that was there is untouched, and the half-install is gone.
+    assert_eq!(
+        std::fs::read_to_string(&bin).expect("still there"),
+        "#!/bin/sh\necho mine\n"
+    );
+    assert!(!bin.is_symlink());
+    assert!(
+        !env.caskroom(token).exists(),
+        "the failed version was purged"
+    );
+    assert!(!env.appdir().join(app).exists());
+}
+
+/// An app the user deleted by hand still leaves Caskroom records, and
+/// `uninstall` has to clean them up rather than refuse.
+#[test]
+fn uninstall_cleans_up_after_a_manually_deleted_app() {
+    let env = env_or_skip!();
+    let token = "fastbrew-deleted-app";
+    let app = "FastbrewDeletedApp.app";
+    env.install_app_cask(token, app, "1.0", "");
+
+    std::fs::remove_dir_all(env.appdir().join(app)).expect("delete the app by hand");
+    assert_eq!(env.stdout(&["list", "--cask"]), format!("{token}\n"));
+
+    let out = env.run(&["uninstall", "--cask", token]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!env.caskroom(token).exists());
+    assert_eq!(env.stdout(&["list", "--cask"]), "");
+}
+
+/// `--adopt` takes over an app that is already in the app directory when it
+/// is the same bundle, and refuses when it is not.
+#[test]
+fn adopt_takes_over_an_identical_app() {
+    let env = env_or_skip!();
+    let token = "fastbrew-adopt";
+    let app = "FastbrewAdopt.app";
+    let url = fixture_url(token, "1.0");
+    let sha = env.seed_app_zip(&url, app, "1.0");
+    env.write_cask(token, &app_cask_rb(token, "1.0", &url, &sha, app, ""));
+
+    // Put a *different* app there first: adoption has to refuse it.
+    let target = env.appdir().join(app);
+    std::fs::create_dir_all(target.join("Contents/MacOS")).expect("mkdir");
+    std::fs::write(
+        target.join("Contents/MacOS/demo"),
+        "#!/bin/sh\necho other\n",
+    )
+    .expect("write");
+    let out = env.run(&["install", "--cask", "--adopt", token]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = support::strip_ansi(&String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stderr.contains("It seems the existing App is different from the one being installed."),
+        "{stderr}"
+    );
+
+    // Without `--adopt` or `--force` an occupied target is a hard error.
+    let out = env.run(&["install", "--cask", token]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stderr)).contains(&format!(
+            "It seems there is already an App at '{}'.",
+            target.display()
+        )),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The identical bundle is adopted: the app stays where it is and the
+    // Caskroom records it.
+    std::fs::remove_dir_all(&target).expect("remove");
+    let staged = build_app_zip(&env.sandbox.home.join("fixtures"), app, "1.0");
+    let unzip = env.sandbox.home.join("adopt-src");
+    let _ = std::fs::remove_dir_all(&unzip);
+    std::fs::create_dir_all(&unzip).expect("mkdir");
+    assert!(
+        Command::new("ditto")
+            .args(["-x", "-k"])
+            .arg(&staged)
+            .arg(&unzip)
+            .status()
+            .expect("run ditto")
+            .success()
+    );
+    std::fs::rename(unzip.join(app), &target).expect("put the app in place");
+
+    let out = env.run(&["install", "--cask", "--adopt", token]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        support::strip_ansi(&String::from_utf8_lossy(&out.stdout))
+            .contains(&format!("Adopting existing App at '{}'", target.display())),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(target.join("Contents/MacOS/demo").is_file());
+    assert_eq!(
+        env.stdout(&["list", "--cask", "--versions"]),
+        format!("{token} 1.0\n")
+    );
+    let _ = env.run(&["uninstall", "--cask", token]);
+}
+
+/// A `pkg` cask is planned without running `/usr/sbin/installer`: the dry run
+/// touches nothing, and the command it would build is checked directly
+/// because the real one needs `sudo`.
+#[test]
+fn a_pkg_cask_is_planned_without_running_the_installer() {
+    let env = env_or_skip!();
+    let token = "fastbrew-pkg";
+    let url = fixture_url(token, "1.0");
+    // The container is never unpacked in a dry run, so any bytes will do.
+    env.seed_app_zip(&url, "FastbrewPkg.app", "1.0");
+    env.write_cask(
+        token,
+        &format!(
+            r#"cask "{token}" do
+  version "1.0"
+  sha256 :no_check
+
+  url "{url}"
+  name "pkg fixture"
+  homepage "https://example.invalid/{token}"
+
+  pkg "Fastbrew.pkg"
+
+  uninstall pkgutil: "org.fastbrew.pkg"
+end
+"#
+        ),
+    );
+
+    let plan = env.combined(&["install", "--cask", "--dry-run", token]);
+    assert_eq!(
+        plan,
+        format!("==> Would install 1 cask:\nfixture/casks/{token}\n")
+    );
+    assert!(!env.caskroom(token).exists(), "the dry run staged nothing");
+
+    // `Artifact::Pkg#install_phase` runs exactly this, with `sudo`.
+    let (program, args) = fastbrew::cask::artifacts::pkg_command(
+        Path::new("/Caskroom/fastbrew-pkg/1.0/Fastbrew.pkg"),
+        None,
+        false,
+        false,
+    );
+    assert_eq!(program, "/usr/sbin/installer");
+    assert_eq!(
+        args,
+        [
+            "-pkg",
+            "/Caskroom/fastbrew-pkg/1.0/Fastbrew.pkg",
+            "-target",
+            "/"
+        ]
+    );
+}
+
 // ------------------------------------------------------------------ taps
 
 /// A tap's `cmd/brew-<name>` is an external command: `commands` lists it and

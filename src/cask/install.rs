@@ -66,23 +66,16 @@ pub fn install_casks(
     if opts.dry_run {
         return print_dry_run(cfg, casks, opts);
     }
-    let mut failed: Vec<String> = Vec::new();
     for cask in casks {
         let _lock = crate::keg::lock::lock_cask(cfg, &cask.token)?;
         let dirs = CaskDirs::resolve(cfg, &opts.explicit_dir_flags);
+        // `cmd/install.rb`: `rescue => e; ofail "#{cask.full_name}: #{e}"`.
+        // The run keeps going and ends up exiting 1, with no line of its own.
         if let Err(error) = install_cask_entry(cfg, Some(index), &dirs, cask, opts) {
-            output::onoe(&format!("{}: {error}", cask.full_token()));
-            failed.push(cask.full_token());
+            output::ofail(&format!("{}: {error}", cask.full_token()));
         }
     }
-    if failed.is_empty() {
-        Ok(())
-    } else {
-        Err(Error::user(format!(
-            "Failed to install {}.",
-            failed.join(", ")
-        )))
-    }
+    Ok(())
 }
 
 /// `Install.print_dry_run_casks(casks, include_installed: false)`: what
