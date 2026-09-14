@@ -6,10 +6,12 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
-    name: Build and publish (macOS arm64)
+    name: Build, attest and publish (macOS arm64)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -17,16 +19,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release --locked
+      - name: Smoke test
+        run: |
+          target/release/fastbrew --version
+          codesign --verify --verbose=2 target/release/fastbrew
       - name: Package
         run: |
           mkdir -p dist
-          cp target/release/fastbrew dist/
-          tar -C dist -czf fastbrew-aarch64-apple-darwin.tar.gz fastbrew
-          shasum -a 256 fastbrew-aarch64-apple-darwin.tar.gz > fastbrew-aarch64-apple-darwin.tar.gz.sha256
+          cp target/release/fastbrew dist/fastbrew
+          tar -C dist -czf dist/fastbrew-aarch64-apple-darwin.tar.gz fastbrew
+          mv dist/fastbrew dist/fastbrew-aarch64-apple-darwin
+          (cd dist && shasum -a 256 fastbrew-aarch64-apple-darwin.tar.gz fastbrew-aarch64-apple-darwin > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/fastbrew-aarch64-apple-darwin.tar.gz
+            dist/fastbrew-aarch64-apple-darwin
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            fastbrew-aarch64-apple-darwin.tar.gz
-            fastbrew-aarch64-apple-darwin.tar.gz.sha256
+            dist/fastbrew-aarch64-apple-darwin.tar.gz
+            dist/fastbrew-aarch64-apple-darwin
+            dist/SHA256SUMS
           generate_release_notes: true

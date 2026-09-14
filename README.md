@@ -54,14 +54,40 @@ fastbrew manages Homebrew's own prefix (`/opt/homebrew`) and hands the
 commands it does not implement to `brew`, so Homebrew stays installed next
 to it.
 
-### Prebuilt binary
+### One-line installer
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tigercosmos/fastbrew/master/install.sh | sh
+# or
+wget -qO- https://raw.githubusercontent.com/tigercosmos/fastbrew/master/install.sh | sh
+```
+
+The script downloads the latest release, checks it against the release's
+`SHA256SUMS`, verifies the GitHub build-provenance attestation when the
+`gh` CLI is available, and installs `fastbrew` into the first writable
+directory on your PATH (`FASTBREW_BINDIR` overrides; `FASTBREW_VERSION`
+selects a tag).
+
+### Prebuilt binary by hand
+
+Every release at https://github.com/tigercosmos/fastbrew/releases ships:
+
+- `fastbrew-aarch64-apple-darwin.tar.gz`, the binary in a tarball
+- `fastbrew-aarch64-apple-darwin`, the bare binary
+- `SHA256SUMS`
 
 ```sh
 curl -fsSL https://github.com/tigercosmos/fastbrew/releases/latest/download/fastbrew-aarch64-apple-darwin.tar.gz | tar xz
-sudo install -m 755 fastbrew /usr/local/bin/fastbrew   # or any directory on your PATH
+install -m 755 fastbrew ~/.local/bin/fastbrew          # any directory on your PATH
 ```
 
-Every tagged release ships the binary and a `.sha256` checksum file.
+Releases are built by the `Release` GitHub Actions workflow from the tagged
+commit and carry a signed build-provenance attestation (SLSA, via Sigstore).
+To verify a download came from that workflow:
+
+```sh
+gh attestation verify fastbrew-aarch64-apple-darwin.tar.gz --repo tigercosmos/fastbrew
+```
 
 ### From source
 
