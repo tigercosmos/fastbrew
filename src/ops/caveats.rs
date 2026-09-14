@@ -178,6 +178,18 @@ fn explanation_for(reason: &KegOnly, extra: Option<&str>, cfg: &Config) -> Strin
 
 /// `Caveats#function_completion_caveats` and `#elisp_caveats`.
 pub fn completions_and_elisp(cfg: &Config, formula: &FormulaEntry, keg: &Keg) -> Vec<String> {
+    completions_and_elisp_for_shells(cfg, formula, keg, &preferred_shells())
+}
+
+/// [`completions_and_elisp`] for an explicit list of shells (the caller's
+/// preferred shells in production; fixed in tests so `$SHELL` cannot change
+/// the outcome).
+pub fn completions_and_elisp_for_shells(
+    cfg: &Config,
+    formula: &FormulaEntry,
+    keg: &Keg,
+    shells: &[&'static str],
+) -> Vec<String> {
     let keg_only = formula.is_keg_only();
     let root = if keg_only {
         cfg.opt_record(&formula.name)
@@ -190,7 +202,7 @@ pub fn completions_and_elisp(cfg: &Config, formula: &FormulaEntry, keg: &Keg) ->
     // Homebrew narrows this to the caller's own shell when it recognises it;
     // an unknown shell (or none, as when fastbrew's output is piped) checks all
     // four, which is also what a non-interactive `brew install` does.
-    for shell in preferred_shells() {
+    for &shell in shells {
         let completion = completion_installed(keg, shell);
         let functions = functions_installed(keg, shell);
         if !completion && !functions {
@@ -451,9 +463,10 @@ mod tests {
             name: "demo".into(),
             ..Default::default()
         };
-        // Only assert when a zsh is on PATH, which is the macOS default.
+        // Only assert when a zsh is on PATH, which is the macOS default. The
+        // shell list is explicit so the caller's `$SHELL` cannot narrow it.
         if which("zsh").is_some() {
-            let notes = completions_and_elisp(&cfg, &formula, &keg);
+            let notes = completions_and_elisp_for_shells(&cfg, &formula, &keg, &["zsh"]);
             assert!(
                 notes.iter().any(
                     |n| n.starts_with("zsh completions have been installed to:\n  ")
