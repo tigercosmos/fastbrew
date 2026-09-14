@@ -88,27 +88,27 @@ pub fn upgrade_casks(
     greedy: bool,
     opts: &CaskInstallOptions,
 ) -> Result<()> {
-    let targets: Vec<String> = if tokens.is_empty() {
+    let named = !tokens.is_empty();
+    let targets: Vec<String> = if named {
+        tokens.to_vec()
+    } else {
         super::installed_casks(cfg)
             .into_iter()
             .map(|c| c.token)
             .collect()
-    } else {
-        tokens.to_vec()
     };
 
     let mut upgrades: Vec<(CaskEntry, InstalledCask)> = Vec::new();
     for token in &targets {
         let cask = crate::resolve::resolve_cask(cfg, index, token)?;
         let Some(installed) = super::installed_cask(cfg, &cask.token) else {
-            if tokens.is_empty() {
+            if !named {
                 continue;
             }
             return Err(Error::user(format!("Cask '{token}' is not installed.")));
         };
         // `Cask::Upgrade.outdated_casks`: a cask named on the command line is
         // checked greedily, the sweep over every installed cask is not.
-        let named = !tokens.is_empty();
         if !is_outdated(cfg, &cask, &installed, greedy || named) {
             // The sweep says nothing about the casks it leaves alone; only
             // the named form reports why it is skipping one.
@@ -397,17 +397,26 @@ fn replace_installed(
         force: true,
         ..opts.artifact_options()
     };
-    artifacts::uninstall_specs(
-        cfg,
-        dirs,
-        &predecessor_specs,
-        &predecessor_ctx,
-        opts.zap,
-        predecessor_opts,
-    )?;
 
-    let backup = Backup::create(installed)?;
-    match install_download(cfg, index, dirs, cask, opts, download, true) {
+    // Reversing the predecessor's artifacts is already destructive: an
+    // `uninstall` directive that fails halfway has moved the app out of the
+    // app directory, so the revert has to cover this step and the backup
+    // rename as well, not just the install of the replacement.
+    let mut backup: Option<Backup> = None;
+    let outcome = (|| -> Result<()> {
+        artifacts::uninstall_specs(
+            cfg,
+            dirs,
+            &predecessor_specs,
+            &predecessor_ctx,
+            opts.zap,
+            predecessor_opts,
+        )?;
+        backup = Some(Backup::create(installed)?);
+        install_download(cfg, index, dirs, cask, opts, download, true)
+    })();
+
+    match outcome {
         Ok(()) => {
             // `Cask::Installer#finalize_upgrade`.
             if opts.upgrade {
@@ -416,14 +425,18 @@ fn replace_installed(
                     installed.version, cask.token
                 ));
             }
-            backup.purge();
+            if let Some(backup) = &backup {
+                backup.purge();
+            }
             Ok(())
         }
         Err(error) => {
             // `Cask::Installer#revert_upgrade`: the predecessor was working, so
             // put its staged files, metadata and artifacts back.
             output::opoo(&format!("Reverting upgrade for Cask {}", cask.token));
-            backup.restore();
+            if let Some(backup) = &backup {
+                backup.restore();
+            }
             if let Err(rollback) = artifacts::install_specs(
                 cfg,
                 dirs,
