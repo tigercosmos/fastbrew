@@ -155,14 +155,14 @@ Order of operations for `fastbrew install a b c`:
 3. Take formula locks for everything in the plan (`var/homebrew/locks/<name>.formula.lock`, `flock`), including racks that are already installed and only need their receipt's `installed_on_request` flag set.
 4. Fetch all manifests concurrently, then all blobs concurrently (default 8 in flight, `HOMEBREW_DOWNLOAD_CONCURRENCY`). Verify blob sha256 against the API `bottle_checksum` while streaming. Reuse cached files.
 5. Extract in dependency order (parents after dependencies), each into a temporary directory under the rack, then rename into `Cellar/<name>/<version>`. Extraction of independent formulae runs in parallel.
-6. Write the receipt (`docs/COMPAT.md` section 3) merging the manifest's `sh.brew.tab` with install-time fields.
+6. Collect the receipt's fields (`docs/COMPAT.md` section 3), merging the manifest's `sh.brew.tab` with install-time fields. Its `time` is taken here, but the file is written in step 13: a keg without a receipt is not an installation, so a keg whose finishing failed is removed and retried instead of being reported installed.
 7. Relocate (`docs/COMPAT.md` section 4). Re-sign modified Mach-O files.
 8. Relativize absolute symlinks pointing into the build prefix if it differs from ours.
 9. `optlink`, then `link` unless keg-only (or `--no-link` semantics of keg-only), recording `var/homebrew/linked/<name>`. Conflicts abort the link (not the install) with Homebrew's message unless `--overwrite` or the path is listed in `link_overwrite_paths`.
 10. Write service files (`homebrew.mxcl.<name>.plist` and `homebrew.<name>.service`) into the keg when `service_run_args` exists.
 11. Install `etc` and `var` seed files into the prefix (`.default` suffix when the destination exists and differs).
 12. Run declarative `post_install_steps` (section 7) unless `--skip-post-install`.
-13. Update the receipt's `runtime_dependencies` from the final resolved graph and write it again.
+13. Write the receipt, with `runtime_dependencies` from the final resolved graph. A link that failed in step 9 does not stop the install, so the receipt is written and the keg stays installed.
 14. Print caveats and the summary line `🍺  <keg path>: <n> files, <size>`.
 15. Release the formula locks, then, unless `HOMEBREW_NO_INSTALL_CLEANUP`, remove older kegs of the installed formulae (`cleanup` rules) and unreferenced cached bottles of those formulae. Cleanup takes the same locks per rack, so they have to be free by then.
 

@@ -713,12 +713,23 @@ fn restore_backup(cfg: &Config, item: &Item, poured: Poured) {
 /// the pour raises, and nothing else ever creates one. Keeping it would make
 /// the next `install` report "already installed, it's just not linked" and stop
 /// without ever finishing the work.
+///
+/// [`finish_item`] writes the receipt as its last step, so this is exactly the
+/// test for "this keg was never finished", whether the run failed or was
+/// killed.
 fn discard_unfinished_keg(cfg: &Config, item: &Item) {
-    let keg = item.keg(cfg).path;
-    if !keg.is_dir() || keg.join("INSTALL_RECEIPT.json").is_file() {
+    let keg = item.keg(cfg);
+    if !keg.path.is_dir() || keg.receipt_path().is_file() {
         return;
     }
-    let _ = std::fs::remove_dir_all(&keg);
+    // `Keg#ignore_interrupts_and_uninstall!`: the links go with the keg. A
+    // record left pointing at a keg that is no longer there would make the
+    // next attempt's `link` refuse with "Another version is already linked".
+    // The aliases come from the formula: there is no receipt to read them from.
+    let aliases = &item.formula.aliases;
+    let _ = keg::link::unlink_with_aliases(cfg, &keg, aliases, LinkOptions::default());
+    let _ = std::fs::remove_dir_all(&keg.path);
+    let _ = keg::link::remove_records(cfg, &keg, aliases, &item.formula.oldnames);
     // `remove_dir` only succeeds on an empty rack, which is what we want.
     let _ = std::fs::remove_dir(cfg.rack(item.name()));
 }
@@ -800,7 +811,8 @@ fn finish_item(
         .map(|d| receipt::tab_with_keg_fallback(&d.manifest.tab, &keg.path))
         .unwrap_or_default();
 
-    // 6. Receipt, with the runtime dependencies known so far.
+    // 6. The receipt's fields. Its `time` is when the keg was poured, so it is
+    // taken here; the file itself is written last (step 13).
     let installed_on_request = match item.action {
         // `reinstall`/`upgrade` keep the old receipt's flag.
         Action::Reinstall | Action::Upgrade => {
@@ -808,20 +820,7 @@ fn finish_item(
         }
         Action::Install => item.installed_on_request,
     };
-    let runtime = receipt::runtime_dependencies(cfg, index, &item.formula, &|name| {
-        plan.planned_version(name)
-    });
-    let mut receipt_json = receipt::build(
-        cfg,
-        receipt::ReceiptArgs {
-            formula: &item.formula,
-            tab: &tab,
-            installed_on_request,
-            time: receipt::now(),
-            runtime_dependencies: runtime,
-        },
-    );
-    receipt_json.write(&keg.receipt_path())?;
+    let poured_at = receipt::now();
 
     // 9. optlink, then link unless keg-only.
     let aliases = item.formula.aliases.clone();
@@ -844,7 +843,14 @@ fn finish_item(
             dry_run: false,
             verbose: opts.verbose,
         };
-        if let Err(e) = keg::link::link(cfg, &keg, &item.formula.link_overwrite_paths, link_opts) {
+        // The receipt is not there yet, so the aliases come from the formula.
+        if let Err(e) = keg::link::link_with_aliases(
+            cfg,
+            &keg,
+            &aliases,
+            &item.formula.link_overwrite_paths,
+            link_opts,
+        ) {
             // `FormulaInstaller#link` reports the conflict and carries on: the
             // keg stays installed, and the run fails at the end.
             link_failed = Some(
@@ -889,11 +895,29 @@ fn finish_item(
         }
     }
 
-    // 13. Rewrite the receipt with the final runtime dependencies.
+    // 13. The receipt, with the final runtime dependencies.
+    //
+    // Homebrew's `pour` writes the tab before `finish` links the keg and seeds
+    // `etc`/`var`, so a keg whose finishing raised keeps a receipt: the next
+    // `brew install` calls it installed and never completes the work. Writing
+    // it once, here, is what makes a keg an installation — until then it has
+    // no receipt, `discard_unfinished_keg` removes it and a retry redoes the
+    // whole install. A failed *link* is not such a failure: it does not stop
+    // finishing, so the receipt is written and the keg stays installed, just
+    // as it does for Homebrew.
     let runtime = receipt::runtime_dependencies(cfg, index, &item.formula, &|name| {
         plan.planned_version(name)
     });
-    receipt_json.runtime_dependencies = Some(runtime);
+    let receipt_json = receipt::build(
+        cfg,
+        receipt::ReceiptArgs {
+            formula: &item.formula,
+            tab: &tab,
+            installed_on_request,
+            time: poured_at,
+            runtime_dependencies: runtime,
+        },
+    );
     receipt_json.write(&keg.receipt_path())?;
 
     // 14. Caveats, printed by the caller with the summary line.

@@ -2203,3 +2203,45 @@ fn a_bare_name_still_acts_on_the_rack() {
     ok(&sb, &["uninstall", "fbbarename"]);
     assert!(!keg(&sb, "fbbarename", "1.0").exists());
 }
+
+/// The receipt is what makes a keg an installation, so it is written last: a
+/// keg whose finishing failed carries none, is removed, and the next `install`
+/// does the work instead of reporting it installed.
+#[test]
+fn a_keg_whose_finishing_failed_is_not_installed() {
+    let sb = sandbox_or_skip!();
+
+    // `etc/fbseed` is a file, so seeding `.bottle/etc/fbseed/config` — the
+    // step after linking — cannot create the directory it needs.
+    std::fs::write(sb.prefix.join("etc/fbseed"), b"user data\n").unwrap();
+    let full = Fixture::new("fbfinishfail", "1.0")
+        .file(".bottle/etc/fbseed/config", b"new config\n")
+        .publish(&sb);
+
+    let first = fails(&sb, &["install", &full]);
+    assert!(first.contains("Failed to install fbfinishfail"), "{first}");
+    let keg = keg(&sb, "fbfinishfail", "1.0");
+    assert!(
+        !keg.join("INSTALL_RECEIPT.json").exists(),
+        "an unfinished keg has no receipt:\n{first}"
+    );
+    assert!(!keg.exists(), "and is not left behind:\n{first}");
+
+    // A retry does the work again rather than calling it installed.
+    let second = fails(&sb, &["install", &full]);
+    assert!(
+        !second.contains("is already installed"),
+        "the retry redoes the install:\n{second}"
+    );
+    assert!(second.contains("==> Pouring"), "{second}");
+
+    // With the blocker gone the retry completes, receipt and seeds and all.
+    std::fs::remove_file(sb.prefix.join("etc/fbseed")).unwrap();
+    ok(&sb, &["install", &full]);
+    assert!(keg.join("INSTALL_RECEIPT.json").is_file());
+    assert_eq!(
+        std::fs::read_to_string(sb.prefix.join("etc/fbseed/config")).unwrap(),
+        "new config\n"
+    );
+    assert!(sb.prefix.join("bin/fbfinishfail").is_symlink());
+}

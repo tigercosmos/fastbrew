@@ -205,6 +205,14 @@ Cache naming (shared with Homebrew):
   installed version (`rack.subdirs`); fastbrew does not, so a stale backup can
   never make a rack look like it holds two versions.
 
+DIFFERENCE: Homebrew's `FormulaInstaller#pour` writes the tab before `finish`
+links the keg and seeds `etc`/`var`, so a keg whose finishing raised keeps a
+receipt and the next `brew install` calls it installed without ever completing
+the work. fastbrew writes the receipt as the last step of finishing: until then
+the keg carries none, it is removed along with its links, and a retry does the
+whole install. A link that failed is not such a failure — Homebrew reports it
+and carries on — so the receipt is written and the keg stays installed.
+
 `INSTALL_RECEIPT.json` written after pouring a bottle (pretty JSON, 2-space
 indent, key order as below; keys `built_prefix`, `padded_prefix`,
 `linkage_files`, `binary_relocation_files`, `relocated_build_prefix`,

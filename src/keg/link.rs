@@ -104,9 +104,26 @@ enum Action {
 }
 
 /// Number of symlinks created.
+///
+/// The keg's aliases come from its receipt, which is all `brew link` has to go
+/// on; the installer knows the formula and passes them in with
+/// [`link_with_aliases`], because it writes the receipt only once the install
+/// has finished.
 pub fn link(
     cfg: &Config,
     keg: &Keg,
+    overwrite_globs: &[String],
+    opts: LinkOptions,
+) -> Result<usize> {
+    let aliases = keg.receipt().map(|r| r.aliases).unwrap_or_default();
+    link_with_aliases(cfg, keg, &aliases, overwrite_globs, opts)
+}
+
+/// [`link`] with the formula's aliases supplied by the caller.
+pub fn link_with_aliases(
+    cfg: &Config,
+    keg: &Keg,
+    aliases: &[String],
     overwrite_globs: &[String],
     opts: LinkOptions,
 ) -> Result<usize> {
@@ -120,9 +137,8 @@ pub fn link(
         )));
     }
 
-    let aliases = keg.receipt().map(|r| r.aliases).unwrap_or_default();
     if !opts.dry_run {
-        optlink(cfg, keg, &aliases, &[])?;
+        optlink(cfg, keg, aliases, &[])?;
     }
 
     let mut linker = Linker::new(cfg, keg, overwrite_globs, opts);
@@ -143,9 +159,10 @@ pub fn link(
             if opts.dry_run {
                 return Err(e);
             }
-            let _ = unlink(
+            let _ = unlink_with_aliases(
                 cfg,
                 keg,
+                aliases,
                 LinkOptions {
                     dry_run: false,
                     ..opts
@@ -158,7 +175,21 @@ pub fn link(
 }
 
 /// Number of symlinks removed.
+///
+/// As with [`link`], the keg's aliases come from its receipt; a caller that
+/// knows the formula passes them in with [`unlink_with_aliases`].
 pub fn unlink(cfg: &Config, keg: &Keg, opts: LinkOptions) -> Result<usize> {
+    let aliases = keg.receipt().map(|r| r.aliases).unwrap_or_default();
+    unlink_with_aliases(cfg, keg, &aliases, opts)
+}
+
+/// [`unlink`] with the formula's aliases supplied by the caller.
+pub fn unlink_with_aliases(
+    cfg: &Config,
+    keg: &Keg,
+    aliases: &[String],
+    opts: LinkOptions,
+) -> Result<usize> {
     let mut removed = 0usize;
     let mut dirs: Vec<PathBuf> = Vec::new();
 
@@ -211,11 +242,7 @@ pub fn unlink(cfg: &Config, keg: &Keg, opts: LinkOptions) -> Result<usize> {
     }
 
     if !opts.dry_run {
-        remove_old_aliases(
-            cfg,
-            keg,
-            &keg.receipt().map(|r| r.aliases).unwrap_or_default(),
-        );
+        remove_old_aliases(cfg, keg, aliases);
         let record = cfg.linked_record(&keg.name);
         if keg.is_linked(cfg) {
             let _ = std::fs::remove_file(&record);
