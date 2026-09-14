@@ -74,20 +74,35 @@ pub fn resolve(cfg: &Config, index: &Index, name: &str, kind: Kind) -> Result<Re
 
 /// `NamedArgs#warn_if_cask_conflicts`: a name that is both a formula and a
 /// cask resolves to the formula, with a warning naming the cask.
+///
+/// Only an exact token counts: `return if cask.old_tokens.include?(ref)`
+/// means a name that reaches a cask through a rename is not a conflict. That
+/// also keeps this off the slow path, since it never needs a cask's metadata.
 fn warn_if_cask_conflicts(cfg: &Config, index: &Index, reference: &str) {
     if reference.contains('/') || crate::output::is_quiet() {
         return;
     }
-    let Ok(cask) = resolve_cask(cfg, index, reference) else {
-        return;
+    let tap = if index.has_cask(reference) {
+        "homebrew/cask".to_string()
+    } else {
+        let found = crate::tap::installed_taps(cfg)
+            .into_iter()
+            .filter(|t| !t.is_core() && !t.is_cask())
+            .find(|t| {
+                crate::tap::cask_files(cfg, t)
+                    .iter()
+                    .any(|(token, _)| token == reference)
+            });
+        match found {
+            Some(t) => t.name(),
+            None => return,
+        }
     };
     // `package_conflicts_message`: the fully-qualified token is only offered
     // when the cask has a tap, which every API and tap cask does.
     crate::output::opoo(&format!(
-        "Treating {reference} as a formula. For the cask, use {}/{} or specify the `--cask` flag. \
-         To silence this message, use the `--formula` flag.",
-        cask.tap(),
-        cask.token
+        "Treating {reference} as a formula. For the cask, use {tap}/{reference} or specify the \
+         `--cask` flag. To silence this message, use the `--formula` flag."
     ));
 }
 
