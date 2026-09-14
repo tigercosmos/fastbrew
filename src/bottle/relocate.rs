@@ -206,6 +206,43 @@ pub fn replace_placeholders(cfg: &Config, text: &mut Vec<u8>, openjdk_dep: Optio
     Replacements::new(cfg, None, openjdk_dep, None).apply(text)
 }
 
+/// `BottleSpecification#compatible_locations?`: whether a bottle for this
+/// cellar kind can be poured into our prefix at all. Relocatable cellars
+/// always can; a fixed cellar only when our prefix and cellar are no longer
+/// than the ones the bottle was built for, because the raw prefix strings are
+/// patched in place. Check this before downloading, as Homebrew's
+/// `pour_bottle?` does.
+pub fn compatible_locations(cfg: &Config, cellar_kind: &BottleCellar, tab: &BottleTab) -> bool {
+    let BottleCellar::Fixed(_) = cellar_kind else {
+        return true;
+    };
+    let (Some(build_prefix), Some(build_cellar)) = built_locations(cellar_kind, tab) else {
+        return false;
+    };
+    let ours = cfg.prefix.to_string_lossy().into_owned();
+    let our_cellar = cfg.cellar.to_string_lossy().into_owned();
+    let compatible_cellar = build_cellar == our_cellar || build_cellar.len() >= our_cellar.len();
+    let compatible_prefix = build_prefix == ours || build_prefix.len() >= ours.len();
+    compatible_cellar && compatible_prefix
+}
+
+/// The refusal text for a bottle [`compatible_locations`] rejects.
+pub fn incompatible_locations_message(
+    cfg: &Config,
+    name: &str,
+    cellar_kind: &BottleCellar,
+    tab: &BottleTab,
+) -> String {
+    let (build_prefix, _) = built_locations(cellar_kind, tab);
+    let build_prefix = build_prefix.unwrap_or_else(|| "its build prefix".to_string());
+    let max = build_prefix.len();
+    format!(
+        "{name} was built for {build_prefix} and can only be relocated to a prefix with a maximum length of {max} characters (yours is {}, {} characters)",
+        cfg.prefix.display(),
+        cfg.prefix.to_string_lossy().len()
+    )
+}
+
 /// Apply every relocation step this bottle's cellar kind calls for.
 pub fn relocate_keg(cfg: &Config, args: RelocateArgs<'_>) -> Result<RelocationReport> {
     let keg = args.keg_path;
@@ -1061,6 +1098,36 @@ mod tests {
         assert!(contains(&out, b"x/opt/homebrew"));
         let mode = std::fs::metadata(&binary).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755);
+    }
+
+    #[test]
+    fn compatible_locations_gates_fixed_cellar_bottles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_test(tmp.path());
+        let tab = BottleTab::default();
+        let fixed = BottleCellar::Fixed("/opt/homebrew/Cellar".into());
+        // A temp-dir prefix is far longer than `/opt/homebrew`.
+        assert!(!compatible_locations(&cfg, &fixed, &tab));
+        let message = incompatible_locations_message(&cfg, "epic5", &fixed, &tab);
+        assert!(
+            message.starts_with(
+                "epic5 was built for /opt/homebrew and can only be relocated to a prefix with a maximum length of 13 characters"
+            ),
+            "{message}"
+        );
+        // Relocatable cellars never care about the prefix length.
+        assert!(compatible_locations(&cfg, &BottleCellar::Any, &tab));
+        assert!(compatible_locations(
+            &cfg,
+            &BottleCellar::AnySkipRelocation,
+            &tab
+        ));
+
+        // A short enough prefix is compatible.
+        let mut short = Config::for_test(Path::new("/tmp"));
+        short.prefix = PathBuf::from("/tmp/f/prefix");
+        short.cellar = PathBuf::from("/tmp/f/prefix/Cellar");
+        assert!(compatible_locations(&short, &fixed, &tab));
     }
 
     #[test]

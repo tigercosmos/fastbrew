@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use fastbrew::bottle::relocate::{RelocateArgs, relocate_keg};
+use fastbrew::bottle::relocate::{self, RelocateArgs, relocate_keg};
 use fastbrew::bottle::{BottleRef, extract, fetch};
 use fastbrew::config::Config;
 use fastbrew::keg::Keg;
@@ -53,6 +53,14 @@ const ACK: Bottle = Bottle {
     version: "3.10.0",
     rebuild: 0,
     sha256: "0f50e7b207da891500f42b5671413f290d4db5fea49943cfefcc74a3684760d9",
+};
+/// A fixed-cellar (`/opt/homebrew/Cellar`) bottle with a non-empty
+/// `binary_relocation_files`, for build-prefix relocation.
+const EPIC5: Bottle = Bottle {
+    name: "epic5",
+    version: "3.0.3",
+    rebuild: 1,
+    sha256: "329dc5c35a410f8d424cf3467191892796138f37fc5325c1e9ca78feda89ac4e",
 };
 
 struct Bottle {
@@ -96,6 +104,23 @@ fn network() -> bool {
         eprintln!("skipping: set FASTBREW_TEST_NETWORK=1 to run network tests");
     }
     on
+}
+
+/// A second sandbox whose prefix is short enough for build-prefix relocation
+/// (`/opt/homebrew` is 13 bytes, so the prefix must be at most that long).
+/// Shares the outer sandbox's cache so nothing is downloaded twice.
+fn short_prefix_sandbox(outer: &Config) -> Option<Config> {
+    let mut cfg = outer.clone();
+    cfg.prefix = PathBuf::from("/tmp/fb-t/prf");
+    cfg.cellar = cfg.prefix.join("Cellar");
+    cfg.repository = cfg.prefix.clone();
+    cfg.library = cfg.prefix.join("Library");
+    assert_eq!(cfg.prefix.to_string_lossy().len(), 13);
+    if std::fs::create_dir_all(cfg.cellar.join("..")).is_err() {
+        eprintln!("skipping: cannot create {}", cfg.prefix.display());
+        return None;
+    }
+    Some(cfg)
 }
 
 /// Fetch, extract and relocate one bottle; returns the keg and the timings.
@@ -308,6 +333,83 @@ fn pours_an_all_tag_skip_relocation_bottle() {
         format!("#!{}/opt/perl/bin/perl", cfg.prefix.display()),
         "perl placeholder was not expanded"
     );
+}
+
+#[test]
+fn relocates_the_build_prefix_of_a_fixed_cellar_bottle() {
+    let Some(outer) = sandbox() else { return };
+    if !network() {
+        return;
+    }
+    let fixed = BottleCellar::Fixed("/opt/homebrew/Cellar".to_string());
+    let reference = EPIC5.reference(&outer);
+    let manifest = fetch::fetch_manifest(&outer, &reference, true).expect("manifest");
+    assert_eq!(
+        manifest.tab.binary_relocation_files.as_deref(),
+        Some(&["bin/epic5-2157".to_string()][..]),
+        "the bottle no longer records the binary this test patches"
+    );
+
+    // The sandbox prefix is far longer than `/opt/homebrew`, so the bottle is
+    // refused before anything is extracted, exactly as `pour_bottle?` does.
+    assert!(!relocate::compatible_locations(
+        &outer,
+        &fixed,
+        &manifest.tab
+    ));
+    let message = relocate::incompatible_locations_message(&outer, "epic5", &fixed, &manifest.tab);
+    assert!(
+        message.starts_with(
+            "epic5 was built for /opt/homebrew and can only be relocated to a prefix with a maximum length of 13 characters"
+        ),
+        "{message}"
+    );
+
+    // A 13-byte prefix fits, so the raw prefix strings can be patched in place.
+    let Some(cfg) = short_prefix_sandbox(&outer) else {
+        return;
+    };
+    assert!(relocate::compatible_locations(&cfg, &fixed, &manifest.tab));
+    let blob = fetch::fetch_blob(&cfg, &reference, true).expect("blob");
+    let keg_path =
+        extract::extract_bottle(&cfg, &blob, EPIC5.name, EPIC5.version, true).expect("extract");
+    let report = relocate_keg(
+        &cfg,
+        RelocateArgs {
+            keg_path: &keg_path,
+            cellar_kind: &fixed,
+            tab: &manifest.tab,
+            openjdk_dep: None,
+        },
+    )
+    .expect("relocate");
+
+    assert_eq!(
+        report.relocated_build_prefix.as_deref(),
+        Some("/opt/homebrew")
+    );
+    assert_eq!(report.relocated_files, vec!["bin/epic5-2157".to_string()]);
+    let binary = keg_path.join("bin/epic5-2157");
+    let bytes = std::fs::read(&binary).unwrap();
+    assert!(
+        !bytes.windows(13).any(|w| w == b"/opt/homebrew"),
+        "the build prefix is still baked into the binary"
+    );
+    assert!(
+        bytes.windows(13).any(|w| w == b"/tmp/fb-t/prf"),
+        "the new prefix was not written"
+    );
+    assert!(
+        codesign_verifies(&binary),
+        "the patched binary was not re-signed"
+    );
+    // The mode survived the rewrite, so the binary is still executable.
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&binary).unwrap().permissions().mode() & 0o111,
+        0o111
+    );
+    let _ = std::fs::remove_dir_all("/tmp/fb-t");
 }
 
 #[test]
