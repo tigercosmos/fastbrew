@@ -54,9 +54,7 @@ impl Tap {
             name.to_string()
         };
 
-        let mut parts = reference.splitn(2, '/');
-        let user = parts.next()?;
-        let repo = parts.next()?;
+        let (user, repo) = reference.split_once('/')?;
         if user.is_empty() || repo.is_empty() || repo.contains('/') {
             return None;
         }
@@ -313,7 +311,7 @@ fn number_readable(n: u64) -> String {
     let digits: Vec<char> = n.to_string().chars().collect();
     let mut out = String::new();
     for (i, c) in digits.iter().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(*c);
@@ -369,10 +367,15 @@ pub fn tap_with_outcome(
         )));
     }
 
-    let remote = url.map(str::to_string).unwrap_or_else(|| tap.default_remote());
+    let remote = url
+        .map(str::to_string)
+        .unwrap_or_else(|| tap.default_remote());
 
     if !quiet {
-        eprintln!("{}", output::format_ohai(&format!("Tapping {}", tap.name())));
+        eprintln!(
+            "{}",
+            output::format_ohai(&format!("Tapping {}", tap.name()))
+        );
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -517,10 +520,7 @@ pub fn update_one(cfg: &Config, tap: &Tap, quiet: bool) -> Result<Option<Tap>> {
     if !merged.status.success() {
         let pulled = git(&path, &["pull", "--ff-only"])?;
         if !pulled.status.success() && !quiet {
-            output::opoo(&format!(
-                "Tap {} could not be fast-forwarded.",
-                tap.name()
-            ));
+            output::opoo(&format!("Tap {} could not be fast-forwarded.", tap.name()));
         }
     }
 
