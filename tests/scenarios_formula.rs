@@ -1771,3 +1771,477 @@ end
         "each package is planned once:\n{both}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 10. Fixture bottles: a tap whose bottles are seeded into the cache
+// ---------------------------------------------------------------------------
+
+/// A formula in a fixture tap together with the bottle it points at.
+///
+/// The bottle is built here and copied straight into the download cache under
+/// the name `bottle::fetch` derives from its registry URL, so these tests pour
+/// a real archive through the real install pipeline without a network. Every
+/// fixture uses an `all` bottle, so nothing depends on the host's bottle tag.
+struct Fixture {
+    /// `user/repo` of the tap that carries the formula.
+    tap: String,
+    name: String,
+    version: String,
+    /// Regular files relative to the keg root.
+    files: Vec<(String, Vec<u8>)>,
+    /// Symlink entries `(path relative to the keg root, target)`. An empty
+    /// path makes the keg root itself a symlink.
+    links: Vec<(String, String)>,
+    /// `cellar:` of the bottle block. `any` makes the installer relocate.
+    cellar: &'static str,
+    /// `sh.brew.tab`'s `linkage_files`, which relocation reads.
+    linkage_files: Vec<String>,
+}
+
+// Each test uses the parts of the builder its own bottle needs.
+#[allow(dead_code)]
+impl Fixture {
+    fn new(name: &str, version: &str) -> Fixture {
+        Fixture {
+            tap: "review/fixtures".to_string(),
+            name: name.to_string(),
+            version: version.to_string(),
+            files: vec![(format!("bin/{name}"), b"#!/bin/sh\necho fixture\n".to_vec())],
+            links: Vec::new(),
+            cellar: "any_skip_relocation",
+            linkage_files: Vec::new(),
+        }
+    }
+
+    fn in_tap(mut self, tap: &str) -> Fixture {
+        self.tap = tap.to_string();
+        self
+    }
+
+    /// Where this tap's bottles pretend to be served from. Nothing is ever
+    /// fetched: the cache is seeded under exactly this URL's cache path.
+    fn root_url(&self) -> String {
+        format!("https://bottles.invalid/v2/{}", self.tap)
+    }
+
+    fn file(mut self, path: &str, body: &[u8]) -> Fixture {
+        self.files.push((path.to_string(), body.to_vec()));
+        self
+    }
+
+    fn no_files(mut self) -> Fixture {
+        self.files.clear();
+        self
+    }
+
+    fn link(mut self, path: &str, target: &str) -> Fixture {
+        self.links.push((path.to_string(), target.to_string()));
+        self
+    }
+
+    /// Make the installer relocate the keg, reading `path` as a Mach-O file.
+    fn relocates(mut self, path: &str) -> Fixture {
+        self.cellar = "any";
+        self.linkage_files.push(path.to_string());
+        self
+    }
+
+    /// Write the tap formula and seed the bottle; returns the full name.
+    fn publish(&self, sb: &Sandbox) -> String {
+        let (user, repo) = self.tap.split_once('/').expect("user/repo");
+        let formulae = sb
+            .prefix
+            .join("Library/Taps")
+            .join(user)
+            .join(format!("homebrew-{repo}"))
+            .join("Formula");
+        std::fs::create_dir_all(&formulae).expect("mkdir the fixture tap");
+        let tarball = self.build(sb);
+        let sha = fastbrew::cask::download::file_sha256(&tarball).expect("sha256 of the bottle");
+
+        let class: String = self
+            .name
+            .chars()
+            .enumerate()
+            .map(|(i, c)| if i == 0 { c.to_ascii_uppercase() } else { c })
+            .collect();
+        std::fs::write(
+            formulae.join(format!("{}.rb", self.name)),
+            format!(
+                r#"class {class} < Formula
+  desc "Fixture formula for the scenario tests"
+  homepage "https://example.invalid/{name}"
+  url "https://example.invalid/{name}-{version}.tar.gz"
+  version "{version}"
+  sha256 "{zeros}"
+
+  bottle do
+    root_url "{root_url}"
+    sha256 cellar: :{cellar}, all: "{sha}"
+  end
+end
+"#,
+                name = self.name,
+                version = self.version,
+                cellar = self.cellar,
+                root_url = self.root_url(),
+                zeros = "0".repeat(64),
+            ),
+        )
+        .expect("write the fixture formula");
+
+        let blob_url = format!("{}/{}/blobs/sha256:{sha}", self.root_url(), self.name);
+        std::fs::copy(
+            &tarball,
+            cached_download(
+                sb,
+                &blob_url,
+                &format!("{}--{}.all.bottle.tar.gz", self.name, self.version),
+            ),
+        )
+        .expect("seed the bottle into the cache");
+
+        let tab = serde_json::json!({
+            "changed_files": [],
+            "linkage_files": self.linkage_files,
+            "runtime_dependencies": [],
+        });
+        let manifest = serde_json::json!({
+            "manifests": [{
+                "annotations": {
+                    "org.opencontainers.image.ref.name": format!("{}.all", self.version),
+                    "sh.brew.bottle.digest": sha,
+                    "sh.brew.tab": tab.to_string(),
+                },
+            }],
+        });
+        let manifest_url = format!(
+            "{}/{}/manifests/{}",
+            self.root_url(),
+            self.name,
+            self.version
+        );
+        std::fs::write(
+            cached_download(
+                sb,
+                &manifest_url,
+                &format!("{}-{}.bottle_manifest.json", self.name, self.version),
+            ),
+            manifest.to_string(),
+        )
+        .expect("seed the manifest into the cache");
+
+        format!("{}/{}", self.tap, self.name)
+    }
+
+    /// `<name>/<version>/...` as a gzipped tar.
+    fn build(&self, sb: &Sandbox) -> PathBuf {
+        use std::io::Write;
+
+        let dir = sb.home.join("fixtures");
+        std::fs::create_dir_all(&dir).expect("mkdir fixtures");
+        let path = dir.join(format!("{}--{}.tar.gz", self.name, self.version));
+        let out = std::fs::File::create(&path).expect("create the fixture bottle");
+        let enc = flate2::write::GzEncoder::new(out, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(enc);
+
+        let root = format!("{}/{}", self.name, self.version);
+        let directory = |builder: &mut tar::Builder<_>, path: String| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Directory);
+            h.set_mode(0o755);
+            h.set_size(0);
+            h.set_mtime(1_700_000_000);
+            h.set_cksum();
+            builder.append_data(&mut h, path, std::io::empty()).unwrap();
+        };
+        directory(&mut builder, format!("{}/", self.name));
+        if !self.files.is_empty() {
+            directory(&mut builder, format!("{root}/"));
+        }
+        for (rel, body) in &self.files {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_mode(0o755);
+            h.set_size(body.len() as u64);
+            h.set_mtime(1_700_000_000);
+            h.set_cksum();
+            builder
+                .append_data(&mut h, format!("{root}/{rel}"), body.as_slice())
+                .unwrap();
+        }
+        for (rel, target) in &self.links {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_mode(0o777);
+            h.set_size(0);
+            h.set_mtime(1_700_000_000);
+            let path = if rel.is_empty() {
+                root.clone()
+            } else {
+                format!("{root}/{rel}")
+            };
+            builder.append_link(&mut h, path, target).unwrap();
+        }
+        builder
+            .into_inner()
+            .unwrap()
+            .finish()
+            .unwrap()
+            .flush()
+            .unwrap();
+        path
+    }
+}
+
+/// The cache path `bottle::fetch` stores `url` at.
+fn cached_download(sb: &Sandbox, url: &str, basename: &str) -> PathBuf {
+    let dir = sb.cache.join("downloads");
+    std::fs::create_dir_all(&dir).expect("mkdir downloads");
+    dir.join(format!(
+        "{}--{}",
+        fastbrew::bottle::fetch::url_hash(url),
+        fastbrew::bottle::fetch::safe_filename(basename)
+    ))
+}
+
+/// A tarball whose `<name>/<version>` entry is a symlink passes `is_dir`, so
+/// without an `lstat` check it becomes the keg and every later write — the
+/// receipt first of all — lands wherever it points.
+#[test]
+fn a_bottle_whose_keg_root_is_a_symlink_is_refused() {
+    let sb = sandbox_or_skip!();
+
+    let victim = sb.home.join("outside-keg");
+    std::fs::create_dir_all(victim.join("bin")).unwrap();
+    let kept = "{\"user_data\":\"must not be overwritten\"}";
+    std::fs::write(victim.join("INSTALL_RECEIPT.json"), kept).unwrap();
+
+    let full = Fixture::new("fbescaperoot", "1.0")
+        .no_files()
+        .link("", victim.to_str().unwrap())
+        .publish(&sb);
+
+    let text = fails(&sb, &["install", &full]);
+    assert!(text.contains("would land outside the Cellar"), "{text}");
+    assert!(
+        std::fs::symlink_metadata(keg(&sb, "fbescaperoot", "1.0")).is_err(),
+        "no keg was promoted into the Cellar"
+    );
+    assert_eq!(
+        std::fs::read_to_string(victim.join("INSTALL_RECEIPT.json")).unwrap(),
+        kept,
+        "nothing outside the Cellar was written"
+    );
+}
+
+/// `Homebrew::Reinstall` keeps the keg it replaces at `<version>.reinstall`
+/// until `finish` returned, so a reinstall that dies in relocation leaves the
+/// working keg — and its links — exactly where they were.
+#[test]
+fn a_reinstall_that_cannot_relocate_puts_the_working_keg_back() {
+    let sb = sandbox_or_skip!();
+
+    let full = Fixture::new("fbrelocatefail", "1.0").publish(&sb);
+    ok(&sb, &["install", &full]);
+    let command = sb.prefix.join("bin/fbrelocatefail");
+    assert!(command.is_symlink(), "the first install linked the command");
+
+    // The replacement checksums fine but carries a file that relocation
+    // cannot read as the Mach-O the bottle's tab promises.
+    Fixture::new("fbrelocatefail", "1.0")
+        .no_files()
+        .file("bin/fbrelocatefail", b"\xcf\xfa\xed\xfe")
+        .relocates("bin/fbrelocatefail")
+        .publish(&sb);
+
+    let text = fails(&sb, &["reinstall", &full]);
+    assert!(text.contains("Failed to install fbrelocatefail"), "{text}");
+
+    let keg = keg(&sb, "fbrelocatefail", "1.0");
+    assert_eq!(
+        std::fs::read_to_string(keg.join("bin/fbrelocatefail")).unwrap(),
+        "#!/bin/sh\necho fixture\n",
+        "the working keg is back:\n{text}"
+    );
+    assert!(keg.join("INSTALL_RECEIPT.json").is_file(), "{text}");
+    assert!(command.is_symlink(), "the command is linked again:\n{text}");
+    assert!(
+        sb.prefix.join("opt/fbrelocatefail").is_symlink(),
+        "the opt record is back:\n{text}"
+    );
+    assert!(
+        !sb.prefix
+            .join("Cellar/fbrelocatefail/1.0.reinstall")
+            .exists(),
+        "no backup was left behind:\n{text}"
+    );
+    // The restored keg is one installed version, not two.
+    let list = ok(&sb, &["list", "--versions", "fbrelocatefail"]);
+    assert_eq!(list.trim(), "fbrelocatefail 1.0", "{list}");
+}
+
+/// A link that does not work out is not a failed install for Homebrew: the keg
+/// stays, with its receipt, and only the `brew link` step is reported. The
+/// backup therefore goes, exactly as it does after a clean reinstall.
+#[test]
+fn a_reinstall_whose_link_fails_keeps_the_new_keg() {
+    let sb = sandbox_or_skip!();
+
+    let full = Fixture::new("fblinkfail", "1.0").publish(&sb);
+    ok(&sb, &["install", &full]);
+
+    // Something that is not ours sits where the replacement's second command
+    // would go. Unlinking the old keg leaves it alone, so the link fails.
+    std::fs::write(sb.prefix.join("bin/fblinkfail-extra"), b"not ours\n").unwrap();
+    Fixture::new("fblinkfail", "1.0")
+        .file("bin/fblinkfail-extra", b"#!/bin/sh\necho extra\n")
+        .publish(&sb);
+
+    let text = fails(&sb, &["reinstall", &full]);
+    assert!(
+        text.contains("The `brew link` step did not complete successfully"),
+        "{text}"
+    );
+
+    let keg = keg(&sb, "fblinkfail", "1.0");
+    assert!(
+        keg.join("bin/fblinkfail-extra").is_file(),
+        "the replacement was poured:\n{text}"
+    );
+    assert!(keg.join("INSTALL_RECEIPT.json").is_file(), "{text}");
+    assert!(
+        !sb.prefix.join("Cellar/fblinkfail/1.0.reinstall").exists(),
+        "the replaced keg is gone:\n{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sb.prefix.join("bin/fblinkfail-extra")).unwrap(),
+        "not ours\n",
+        "the foreign file is untouched"
+    );
+}
+
+/// Two taps can carry the same formula name, and both want the same rack.
+/// `Formulary.to_rack` reduces `user/repo/jq` to the basename, so a
+/// tap-qualified command would act on whatever that rack holds; removing
+/// another tap's package that way cannot be undone.
+#[test]
+fn a_tap_qualified_command_refuses_another_taps_keg() {
+    let sb = sandbox_or_skip!();
+
+    let one = Fixture::new("fbidentity", "1.0")
+        .in_tap("review/one")
+        .publish(&sb);
+    Fixture::new("fbidentity", "1.0")
+        .in_tap("review/two")
+        .file("bin/fbidentity-two", b"#!/bin/sh\necho two\n")
+        .publish(&sb);
+    ok(&sb, &["install", &one]);
+
+    let text = fails(&sb, &["uninstall", "review/two/fbidentity"]);
+    assert!(
+        text.contains("fbidentity was installed from the review/one tap"),
+        "{text}"
+    );
+    assert!(
+        text.contains("but you are trying to uninstall it from the review/two tap."),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "Formulae with the same name from different taps cannot be installed at the same time."
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("  brew uninstall review/one/fbidentity"),
+        "{text}"
+    );
+
+    // Every command that unlinks, removes or rewrites the rack refuses the
+    // same way, and each names itself.
+    for (args, verb) in [
+        (["install", "review/two/fbidentity"], "install"),
+        (["reinstall", "review/two/fbidentity"], "reinstall"),
+        (["upgrade", "review/two/fbidentity"], "upgrade"),
+        (["link", "review/two/fbidentity"], "link"),
+        (["unlink", "review/two/fbidentity"], "unlink"),
+        (["pin", "review/two/fbidentity"], "pin"),
+        (["unpin", "review/two/fbidentity"], "unpin"),
+        (["postinstall", "review/two/fbidentity"], "postinstall"),
+    ] {
+        let text = fails(&sb, &args);
+        assert!(
+            text.contains(&format!(
+                "but you are trying to {verb} it from the review/two tap."
+            )),
+            "{args:?}:\n{text}"
+        );
+    }
+
+    // Tap one's keg is untouched, still linked, and still the only version.
+    let keg = keg(&sb, "fbidentity", "1.0");
+    assert!(keg.join("INSTALL_RECEIPT.json").is_file());
+    assert!(!keg.join("bin/fbidentity-two").exists(), "tap two's file");
+    assert!(sb.prefix.join("bin/fbidentity").is_symlink());
+    assert!(sb.prefix.join("opt/fbidentity").is_symlink());
+
+    // The tap it came from still works.
+    ok(&sb, &["uninstall", &one]);
+    assert!(!keg.exists());
+}
+
+/// A bare name keeps Homebrew's behavior of acting on whatever the rack holds.
+#[test]
+fn a_bare_name_still_acts_on_the_rack() {
+    let sb = sandbox_or_skip!();
+
+    let full = Fixture::new("fbbarename", "1.0")
+        .in_tap("review/one")
+        .publish(&sb);
+    ok(&sb, &["install", &full]);
+    ok(&sb, &["uninstall", "fbbarename"]);
+    assert!(!keg(&sb, "fbbarename", "1.0").exists());
+}
+
+/// The receipt is what makes a keg an installation, so it is written last: a
+/// keg whose finishing failed carries none, is removed, and the next `install`
+/// does the work instead of reporting it installed.
+#[test]
+fn a_keg_whose_finishing_failed_is_not_installed() {
+    let sb = sandbox_or_skip!();
+
+    // `etc/fbseed` is a file, so seeding `.bottle/etc/fbseed/config` — the
+    // step after linking — cannot create the directory it needs.
+    std::fs::write(sb.prefix.join("etc/fbseed"), b"user data\n").unwrap();
+    let full = Fixture::new("fbfinishfail", "1.0")
+        .file(".bottle/etc/fbseed/config", b"new config\n")
+        .publish(&sb);
+
+    let first = fails(&sb, &["install", &full]);
+    assert!(first.contains("Failed to install fbfinishfail"), "{first}");
+    let keg = keg(&sb, "fbfinishfail", "1.0");
+    assert!(
+        !keg.join("INSTALL_RECEIPT.json").exists(),
+        "an unfinished keg has no receipt:\n{first}"
+    );
+    assert!(!keg.exists(), "and is not left behind:\n{first}");
+
+    // A retry does the work again rather than calling it installed.
+    let second = fails(&sb, &["install", &full]);
+    assert!(
+        !second.contains("is already installed"),
+        "the retry redoes the install:\n{second}"
+    );
+    assert!(second.contains("==> Pouring"), "{second}");
+
+    // With the blocker gone the retry completes, receipt and seeds and all.
+    std::fs::remove_file(sb.prefix.join("etc/fbseed")).unwrap();
+    ok(&sb, &["install", &full]);
+    assert!(keg.join("INSTALL_RECEIPT.json").is_file());
+    assert_eq!(
+        std::fs::read_to_string(sb.prefix.join("etc/fbseed/config")).unwrap(),
+        "new config\n"
+    );
+    assert!(sb.prefix.join("bin/fbfinishfail").is_symlink());
+}

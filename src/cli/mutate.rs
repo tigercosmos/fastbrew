@@ -32,10 +32,16 @@ fn kind_of(formula: bool, cask: bool) -> Kind {
 /// re-resolving `user/repo/jq` downstream would give core's `jq`, because the
 /// API loader runs before any tap loader, and the same holds for a cask a tap
 /// qualifies.
+///
+/// `acting_on_installed` names the command for
+/// [`resolve::check_installed_tap`], which refuses a tap-qualified name whose
+/// rack holds another tap's package. `fetch` passes `None`: it only downloads,
+/// and never touches the rack.
 fn partition(
     ctx: &Ctx,
     names: &[String],
     kind: Kind,
+    acting_on_installed: Option<&str>,
 ) -> Result<(
     Vec<crate::model::FormulaEntry>,
     Vec<crate::model::CaskEntry>,
@@ -45,7 +51,12 @@ fn partition(
     let mut casks = Vec::new();
     for name in names {
         match resolve::resolve(&ctx.cfg, index, name, kind)? {
-            resolve::Resolved::Formula(f) => formulae.push(f),
+            resolve::Resolved::Formula(f) => {
+                if let Some(action) = acting_on_installed {
+                    resolve::check_installed_tap(&ctx.cfg, name, &f, action)?;
+                }
+                formulae.push(f);
+            }
             resolve::Resolved::Cask(c) => casks.push(c),
         }
     }
@@ -120,7 +131,13 @@ pub fn install(ctx: &Ctx, args: &InstallArgs, reinstall: bool) -> Result<()> {
         return ctx.delegate(reason);
     }
     crate::update::auto_update_if_needed(&ctx.cfg, "install", &args.names);
-    let (formulae, casks) = partition(ctx, &args.names, kind_of(args.formula, args.cask))?;
+    let action = if reinstall { "reinstall" } else { "install" };
+    let (formulae, casks) = partition(
+        ctx,
+        &args.names,
+        kind_of(args.formula, args.cask),
+        Some(action),
+    )?;
     let index = ctx.index()?;
 
     if !formulae.is_empty() {
@@ -225,7 +242,12 @@ pub struct UpgradeArgs {
 pub fn upgrade(ctx: &Ctx, args: &UpgradeArgs) -> Result<()> {
     crate::update::auto_update_if_needed(&ctx.cfg, "upgrade", &args.names);
     let index = ctx.index()?;
-    let (formulae, casks) = partition(ctx, &args.names, kind_of(args.formula, args.cask))?;
+    let (formulae, casks) = partition(
+        ctx,
+        &args.names,
+        kind_of(args.formula, args.cask),
+        Some("upgrade"),
+    )?;
     let want_formulae = !args.cask || args.formula;
     let want_casks = !args.formula || args.cask;
 
@@ -287,7 +309,12 @@ pub struct UninstallArgs {
 
 pub fn uninstall(ctx: &Ctx, args: &UninstallArgs) -> Result<()> {
     let index = ctx.index()?;
-    let (formulae, casks) = partition(ctx, &args.names, kind_of(args.formula, args.cask))?;
+    let (formulae, casks) = partition(
+        ctx,
+        &args.names,
+        kind_of(args.formula, args.cask),
+        Some("uninstall"),
+    )?;
     if !formulae.is_empty() {
         let opts = UninstallOptions {
             force: args.force,
@@ -399,6 +426,10 @@ pub fn link(ctx: &Ctx, args: &LinkArgs, link_it: bool) -> Result<()> {
         // A keg may outlive its formula; fall back to the rack's name. The
         // rack's own receipt picks the tap (`Formulary.from_rack`).
         let formula = resolve::resolve_installed(&ctx.cfg, index, name).ok();
+        if let Some(f) = formula.as_ref() {
+            let action = if link_it { "link" } else { "unlink" };
+            resolve::check_installed_tap(&ctx.cfg, name, f, action)?;
+        }
         let short = formula
             .as_ref()
             .map(|f| f.name.clone())
@@ -596,6 +627,8 @@ pub fn pin(ctx: &Ctx, args: &PinArgs, pin_it: bool) -> Result<()> {
         }
         // Pinning acts on an installed keg, so the rack's receipt picks the tap.
         let formula = resolve::resolve_installed(&ctx.cfg, index, name)?;
+        let action = if pin_it { "pin" } else { "unpin" };
+        resolve::check_installed_tap(&ctx.cfg, name, &formula, action)?;
         let full = formula.full_name();
         let pinned = crate::keg::is_pinned(&ctx.cfg, &formula.name);
         // `Formula#pinnable?`: there has to be a keg to pin.
@@ -671,6 +704,7 @@ pub fn postinstall(ctx: &Ctx, args: &PostinstallArgs) -> Result<()> {
     let index = ctx.index()?;
     for name in &args.names {
         let formula = resolve::resolve_installed(&ctx.cfg, index, name)?;
+        resolve::check_installed_tap(&ctx.cfg, name, &formula, "postinstall")?;
         let keg = latest_keg(ctx, &formula.name)?;
         // A Ruby `post_install` is the Ruby `brew`'s job; `postinstall` is a
         // whole command, so it hands the invocation over rather than
@@ -710,7 +744,7 @@ pub struct FetchArgs {
 
 pub fn fetch(ctx: &Ctx, args: &FetchArgs) -> Result<()> {
     let index = ctx.index()?;
-    let (formulae, casks) = partition(ctx, &args.names, kind_of(args.formula, args.cask))?;
+    let (formulae, casks) = partition(ctx, &args.names, kind_of(args.formula, args.cask), None)?;
     if !formulae.is_empty() {
         crate::ops::install::fetch_formulae(&ctx.cfg, index, &formulae, args.deps, args.force)?;
     }

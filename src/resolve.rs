@@ -246,6 +246,50 @@ pub fn resolve_installed(cfg: &Config, index: &Index, name: &str) -> Result<Form
     resolve_formula(cfg, index, name)
 }
 
+/// `Homebrew::Install.install_formula?`'s tap check, for every command that
+/// acts on an installed rack.
+///
+/// One rack holds one package: `user/repo/jq` and core's `jq` both want
+/// `$CELLAR/jq`. `Formulary.to_rack` reduces a tap-qualified reference to its
+/// basename, so Homebrew only compares the taps in `brew install`; `brew
+/// uninstall user/repo/jq` removes a core `jq` without a word. fastbrew
+/// compares them in every command that unlinks, removes or rewrites a rack,
+/// because deleting another tap's package cannot be undone.
+///
+/// A bare name keeps Homebrew's behavior of acting on whatever the rack holds:
+/// `brew uninstall jq` removes the installed `jq` whichever tap it came from.
+/// `action` is the command's own name, used both in the sentence and in the
+/// hint that follows it.
+pub fn check_installed_tap(
+    cfg: &Config,
+    reference: &str,
+    entry: &FormulaEntry,
+    action: &str,
+) -> Result<()> {
+    let Some((requested, _)) = split_tap_ref(reference) else {
+        return Ok(());
+    };
+    // `Formula#any_installed_keg`: the opt-linked keg, else the newest.
+    let installed = crate::keg::default_keg(cfg, &entry.name)
+        .and_then(|k| k.receipt().ok())
+        .and_then(|r| r.tap().map(str::to_string));
+    let Some(installed) = installed else {
+        return Ok(());
+    };
+    if installed == requested {
+        return Ok(());
+    }
+    let name = &entry.name;
+    Err(Error::user(format!(
+        "{name} was installed from the {installed} tap\n\
+         but you are trying to {action} it from the {requested} tap.\n\
+         Formulae with the same name from different taps cannot be installed at the same time.\n\
+         \n\
+         To {action} the installed formula, run:\n  \
+         brew {action} {installed}/{name}"
+    )))
+}
+
 /// `Tab.for_keg(rack).tap` when it names a third-party tap.
 pub fn installed_tap(cfg: &Config, name: &str) -> Option<String> {
     let tap = crate::keg::latest_keg(cfg, name)?

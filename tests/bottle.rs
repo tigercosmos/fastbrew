@@ -162,7 +162,8 @@ fn pour(cfg: &Config, bottle: &Bottle) -> (Keg, Duration, Duration) {
 
     let started = Instant::now();
     let keg_path = extract::extract_bottle(cfg, &blob, bottle.name(), bottle.pkg_version(), true)
-        .expect("extract");
+        .expect("extract")
+        .keg;
     let extracted = started.elapsed();
 
     let started = Instant::now();
@@ -405,8 +406,9 @@ fn pours_an_all_tag_skip_relocation_bottle() {
             .is_symlink()
     );
 
-    let keg_path =
-        extract::extract_bottle(&cfg, &blob, ack.name(), ack.pkg_version(), true).unwrap();
+    let keg_path = extract::extract_bottle(&cfg, &blob, ack.name(), ack.pkg_version(), true)
+        .unwrap()
+        .keg;
     let report = relocate_keg(
         &cfg,
         RelocateArgs {
@@ -532,8 +534,9 @@ fn relocates_the_build_prefix_of_a_fixed_cellar_bottle() {
     let short_prefix = cfg.prefix.to_string_lossy().into_owned();
     assert!(relocate::compatible_locations(&cfg, &fixed, &manifest.tab));
     let blob = fetch::fetch_blob(&cfg, &bottle.reference, true).expect("blob");
-    let keg_path =
-        extract::extract_bottle(&cfg, &blob, &name, bottle.pkg_version(), true).expect("extract");
+    let keg_path = extract::extract_bottle(&cfg, &blob, &name, bottle.pkg_version(), true)
+        .expect("extract")
+        .keg;
     let report = relocate_keg(
         &cfg,
         RelocateArgs {

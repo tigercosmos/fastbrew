@@ -769,6 +769,67 @@ fn forced_uninstall_and_cleanup_wait_for_the_formula_lock() {
     assert!(!sb.prefix.join("Cellar/jq").exists());
 }
 
+/// `cleanup` removes a rack that holds nothing, but that is a write like any
+/// other: `--dry-run` must leave it, and the real removal belongs under the
+/// rack's formula lock.
+#[test]
+fn a_dry_run_cleanup_keeps_an_empty_rack() {
+    let Some(sb) = sandbox() else { return };
+
+    let rack = sb.prefix.join("Cellar/fbemptyrack");
+    std::fs::create_dir_all(&rack).unwrap();
+
+    sb.ok(&["cleanup", "--dry-run", "fbemptyrack"]);
+    assert!(rack.is_dir(), "a dry run writes nothing");
+
+    // Another `brew` holding the rack's lock keeps it there too.
+    let held = LockHolder::take(&sb, "fbemptyrack");
+    let out = sb.ok(&["cleanup", "fbemptyrack"]);
+    assert!(
+        out.contains(&format!(
+            "A `brew` process has already locked {}",
+            rack.display()
+        )),
+        "{out}"
+    );
+    assert!(rack.is_dir(), "a locked rack is left alone:\n{out}");
+
+    drop(held);
+    sb.ok(&["cleanup", "fbemptyrack"]);
+    assert!(!rack.exists(), "the real run removes it");
+}
+
+/// A reinstall backup a killed run left behind is not an installed version,
+/// and `cleanup` sweeps it like an interrupted extraction's staging directory
+/// (`Cleanup#cleanup_reinstall_kegs`).
+#[test]
+fn cleanup_sweeps_a_leftover_reinstall_backup() {
+    let Some(sb) = sandbox() else { return };
+
+    let rack = sb.prefix.join("Cellar/fbleftover");
+    let backup = rack.join("1.0.reinstall");
+    std::fs::create_dir_all(backup.join("bin")).unwrap();
+    std::fs::write(backup.join("bin/fbleftover"), "#!/bin/sh\n").unwrap();
+
+    // A rack holding nothing but a backup holds no installed version.
+    let versions = sb.ok(&["list", "--versions"]);
+    assert!(!versions.contains("fbleftover"), "{versions}");
+
+    let dry = sb.ok(&["cleanup", "--dry-run", "fbleftover"]);
+    assert!(
+        dry.contains(&format!("Would remove: {}", backup.display())),
+        "{dry}"
+    );
+    assert!(backup.is_dir(), "a dry run writes nothing");
+
+    let out = sb.ok(&["cleanup", "fbleftover"]);
+    assert!(
+        out.contains(&format!("Removing: {}", backup.display())),
+        "{out}"
+    );
+    assert!(!rack.exists(), "the rack goes with it:\n{out}");
+}
+
 // ---------------------------------------------------------------------------
 // Unit-level tests that need no network
 // ---------------------------------------------------------------------------

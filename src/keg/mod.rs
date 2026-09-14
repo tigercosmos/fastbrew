@@ -118,7 +118,11 @@ pub fn installed_kegs(cfg: &Config, name: &str) -> Vec<Keg> {
         .filter_map(|e| {
             let fname = e.file_name();
             let v = fname.to_str()?;
-            if v.starts_with('.') || !e.path().is_dir() {
+            // `<version>.reinstall` is the keg a reinstall moved aside, not an
+            // installed version: a run that died before it could put it back
+            // must not make the rack look like it holds two versions.
+            if v.starts_with('.') || crate::bottle::extract::is_backup_name(v) || !e.path().is_dir()
+            {
                 return None;
             }
             Some(Keg {
@@ -154,7 +158,10 @@ pub fn installed_formula_names(cfg: &Config) -> Vec<String> {
             let has_keg = std::fs::read_dir(e.path())
                 .map(|r| {
                     r.flatten().any(|k| {
-                        k.path().is_dir() && !k.file_name().to_string_lossy().starts_with('.')
+                        let version = k.file_name().to_string_lossy().into_owned();
+                        k.path().is_dir()
+                            && !version.starts_with('.')
+                            && !crate::bottle::extract::is_backup_name(&version)
                     })
                 })
                 .unwrap_or(false);
