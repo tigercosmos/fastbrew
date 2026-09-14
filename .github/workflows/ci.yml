@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Lint and test (macOS arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit tests
+        run: cargo test --lib
+      - name: Integration tests in an isolated sandbox
+        # The sandbox is a prefix under target/; the runner's own Homebrew is never touched.
+        run: FASTBREW_TEST_NETWORK=1 scripts/sandbox.sh test
+      - name: Release build
+        run: cargo build --release
+      - name: Smoke test the release binary
+        run: |
+          eval "$(scripts/sandbox.sh env)"
+          target/release/fastbrew --version
+          target/release/fastbrew info jq
+          target/release/fastbrew search --desc json | head -5

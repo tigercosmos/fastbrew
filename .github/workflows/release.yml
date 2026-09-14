@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and publish (macOS arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/fastbrew dist/
+          tar -C dist -czf fastbrew-aarch64-apple-darwin.tar.gz fastbrew
+          shasum -a 256 fastbrew-aarch64-apple-darwin.tar.gz > fastbrew-aarch64-apple-darwin.tar.gz.sha256
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            fastbrew-aarch64-apple-darwin.tar.gz
+            fastbrew-aarch64-apple-darwin.tar.gz.sha256
+          generate_release_notes: true

@@ -91,13 +91,20 @@ create() {
            "$prefix"/var/homebrew/{linked,pinned,pinned_casks,locks} \
            "$cache"/{api/internal,downloads,fastbrew} "$dir"/{logs,tmp} \
            "$home"/{Applications,Library/Fonts,Library/LaunchAgents,Library/Caches}
-  # Seed the API cache from the host (read-only copy) to avoid a 15 MB download per sandbox.
-  local tag host_api
+  # Seed the API cache: copy the host's file (read-only) when it exists, so a
+  # developer machine never re-downloads 15 MB per sandbox; otherwise (CI, a
+  # machine without Homebrew) download it from formulae.brew.sh.
+  local tag host_api target
   tag="$(bottle_tag)"
   host_api="$HOME/Library/Caches/Homebrew/api/internal/packages.${tag}.jws.json"
+  target="$cache/api/internal/packages.${tag}.jws.json"
   if [[ -f "$host_api" ]]; then
-    cp "$host_api" "$cache/api/internal/packages.${tag}.jws.json"
-    touch -r "$host_api" "$cache/api/internal/packages.${tag}.jws.json"
+    cp "$host_api" "$target"
+    touch -r "$host_api" "$target"
+  elif [[ -z "${FASTBREW_SANDBOX_OFFLINE:-}" ]]; then
+    curl -fsSL --compressed --retry 3 -o "$target" \
+      "${HOMEBREW_API_DOMAIN:-https://formulae.brew.sh/api}/internal/packages.${tag}.jws.json" \
+      || { rm -f "$target"; echo "sandbox.sh: could not download the package index" >&2; }
   fi
   print_env > "$dir/env.sh"
   echo "sandbox created at $dir (prefix $prefix, bottle tag $tag)"

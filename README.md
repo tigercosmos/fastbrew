@@ -47,7 +47,48 @@ inside the same sandbox prefix (Homebrew 6, portable Ruby):
 The 15 MB package index is parsed once per `update` into a memory-mapped
 file; every query afterwards is a few microseconds of lookups.
 
-## Building
+## Installation
+
+Requirements: macOS on Apple Silicon with Homebrew already installed.
+fastbrew manages Homebrew's own prefix (`/opt/homebrew`) and hands the
+commands it does not implement to `brew`, so Homebrew stays installed next
+to it.
+
+### Prebuilt binary
+
+```sh
+curl -fsSL https://github.com/tigercosmos/fastbrew/releases/latest/download/fastbrew-aarch64-apple-darwin.tar.gz | tar xz
+sudo install -m 755 fastbrew /usr/local/bin/fastbrew   # or any directory on your PATH
+```
+
+Every tagged release ships the binary and a `.sha256` checksum file.
+
+### From source
+
+Needs Rust 1.90 or newer (`rustup` from https://rustup.rs):
+
+```sh
+cargo install --git https://github.com/tigercosmos/fastbrew --locked
+```
+
+This places `fastbrew` in `~/.cargo/bin`, which `rustup` adds to your PATH.
+From a checkout, `cargo install --path . --locked` does the same.
+
+### Use it in place of brew
+
+`fastbrew` accepts the same commands and flags as `brew`, so you can alias
+it in your shell:
+
+```sh
+echo 'alias brew=fastbrew' >> ~/.zshrc
+```
+
+Commands fastbrew does not implement (source builds, `--HEAD`, `bundle`,
+developer commands) are passed to the real `brew` automatically. To remove
+fastbrew, delete the binary; it keeps no state outside Homebrew's cache
+directory (`~/Library/Caches/Homebrew/fastbrew`).
+
+### Building
 
 ```sh
 cargo build --release
