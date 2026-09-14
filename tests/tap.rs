@@ -464,3 +464,112 @@ fn taps_oven_sh_bun_and_reads_it() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn update_reports_the_taps_it_moved() {
+    let Some(sandbox) = Sandbox::new() else {
+        eprintln!("no cached Homebrew API file available; skipping");
+        return;
+    };
+    let tag = support::bottle_tag();
+    let remote = tempfile::tempdir().expect("tempdir");
+    make_bottled_remote(remote.path(), &tag);
+    let url = format!("file://{}", remote.path().display());
+    let out = sandbox.run(&["tap", "tiger/moving", &url]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Nothing moved upstream yet, and the API is unreachable, so the only
+    // thing `update` can say is that everything is current.
+    let offline = |args: &[&str]| {
+        sandbox
+            .cmd()
+            .args(args)
+            .env("HOMEBREW_API_DOMAIN", "http://127.0.0.1:1/api")
+            .env("HOMEBREW_CURL_RETRIES", "0")
+            .output()
+            .expect("run fastbrew")
+    };
+    let out = offline(&["update"]);
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "Already up-to-date."
+    );
+
+    // Add a formula upstream: the pull moves the tap and the report names it.
+    std::fs::write(
+        remote.path().join("Formula/second.rb"),
+        bottled_formula(&tag).replace("class Bottled", "class Second"),
+    )
+    .expect("write");
+    git(remote.path(), &["add", "-A"]);
+    git(remote.path(), &["commit", "--quiet", "-m", "Add second"]);
+
+    let out = offline(&["update"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.starts_with("Updated 1 tap (tiger/moving).\n"),
+        "{text}"
+    );
+    assert!(text.contains("==> New Formulae\n"), "{text}");
+    assert!(text.contains("tiger/moving/second"), "{text}");
+
+    // The new formula is immediately resolvable.
+    let info = sandbox.stdout(&["info", "tiger/moving/second"]);
+    assert!(info.contains("\nTap: tiger/moving\n"), "{info}");
+}
+
+#[test]
+fn commands_lists_a_taps_external_command() {
+    let Some(sandbox) = Sandbox::new() else {
+        eprintln!("no cached Homebrew API file available; skipping");
+        return;
+    };
+    let remote = tempfile::tempdir().expect("tempdir");
+    let cmd_dir = remote.path().join("cmd");
+    std::fs::create_dir_all(&cmd_dir).expect("mkdir cmd");
+    let script = cmd_dir.join("brew-greet");
+    std::fs::write(&script, "#!/bin/sh\necho hi\n").expect("write");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    git(remote.path(), &["init", "--initial-branch=main", "--quiet"]);
+    git(remote.path(), &["add", "-A"]);
+    git(
+        remote.path(),
+        &["commit", "--quiet", "-m", "Add brew-greet"],
+    );
+
+    let url = format!("file://{}", remote.path().display());
+    let out = sandbox.run(&["tap", "tiger/cmds", &url]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Tapped 1 command ("),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let commands = sandbox.stdout(&["commands"]);
+    assert!(commands.contains("\n==> External commands\n"), "{commands}");
+    assert!(
+        commands.lines().any(|l| l == "greet"),
+        "the tap's command is listed:\n{commands}"
+    );
+
+    let tap_info = sandbox.stdout(&["tap-info", "tiger/cmds"]);
+    assert!(tap_info.contains("\n==> Commands\ngreet\n"), "{tap_info}");
+}
