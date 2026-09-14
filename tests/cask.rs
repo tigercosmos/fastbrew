@@ -21,7 +21,7 @@ use fastbrew::api::index::Index;
 use fastbrew::cask::artifacts;
 use fastbrew::cask::config::CaskDirs;
 use fastbrew::cask::install::{CaskInstallOptions, install_cask_entry, upgrade_cask_entry};
-use fastbrew::cask::uninstall::uninstall_installed_cask;
+use fastbrew::cask::uninstall::{CaskUninstallOptions, uninstall_installed_cask};
 use fastbrew::cask::{self, download};
 use fastbrew::config::Config;
 use fastbrew::model::CaskEntry;
@@ -267,7 +267,11 @@ fn installs_and_uninstalls_a_local_cask() {
     assert!(receipt["built_on"].is_object());
 
     // Uninstall with --zap removes everything, including the zapped state.
-    uninstall_installed_cask(&cfg, &dirs, &installed, Some(&cask), true, false)
+    let zap = CaskUninstallOptions {
+        zap: true,
+        ..CaskUninstallOptions::default()
+    };
+    uninstall_installed_cask(&cfg, &dirs, &installed, Some(&cask), zap)
         .expect("uninstall the demo cask");
 
     assert!(!app.exists(), "{} survived the uninstall", app.display());
@@ -385,8 +389,17 @@ fn installs_and_uninstalls_rectangle() {
             .is_symlink()
     );
 
-    uninstall_installed_cask(&cfg, &dirs, &installed, Some(&cask), true, false)
-        .expect("uninstall rectangle");
+    uninstall_installed_cask(
+        &cfg,
+        &dirs,
+        &installed,
+        Some(&cask),
+        CaskUninstallOptions {
+            zap: true,
+            ..CaskUninstallOptions::default()
+        },
+    )
+    .expect("uninstall rectangle");
     assert!(!app.exists(), "{} survived the uninstall", app.display());
     assert!(cask::installed_cask(&cfg, &cask.token).is_none());
 }
@@ -568,6 +581,37 @@ fn dry_run_install_of_an_outdated_cask_changes_nothing() {
     assert_eq!(tree(&caskroom), before, "the dry run changed the Caskroom");
     assert_eq!(cask::installed_cask(&cfg, token).unwrap().version, "1.0");
     assert_eq!(app_version(&app_path), "1.0");
+    reset(&cfg, &dirs, token, app);
+}
+
+#[test]
+fn dry_run_uninstall_removes_nothing() {
+    let root = sandbox_root();
+    let cfg = sandbox_config(&root);
+    let dirs = CaskDirs::resolve(&cfg, &[]);
+    let token = "fastbrew-dry-uninstall";
+    let app = "FastbrewDryUninstall.app";
+    reset(&cfg, &dirs, token, app);
+
+    install_fake(&cfg, &root, &dirs, token, app, "1.0");
+    let caskroom = cask::caskroom_path(&cfg, token);
+    let app_path = dirs.appdir.join(app);
+    let before = tree(&caskroom);
+
+    let installed = cask::installed_cask(&cfg, token).expect("installed");
+    let opts = CaskUninstallOptions {
+        dry_run: true,
+        ..CaskUninstallOptions::default()
+    };
+    uninstall_installed_cask(&cfg, &dirs, &installed, None, opts).expect("the dry run succeeds");
+
+    assert!(
+        app_path.is_dir(),
+        "the dry run removed {}",
+        app_path.display()
+    );
+    assert_eq!(tree(&caskroom), before, "the dry run changed the Caskroom");
+    assert!(cask::installed_cask(&cfg, token).is_some());
     reset(&cfg, &dirs, token, app);
 }
 
@@ -810,6 +854,44 @@ fn cli_sandbox(token: &str) -> Option<(support::Sandbox, String)> {
     let sandbox = support::Sandbox::new()?;
     let version = support::api_index()?.cask(token)?.version?;
     Some((sandbox, version))
+}
+
+#[test]
+fn cli_uninstall_cask_honors_dry_run() {
+    let Some((sandbox, _)) = cli_sandbox("rectangle") else {
+        eprintln!("no cached Homebrew API file available; skipping");
+        return;
+    };
+    let app = fake_cli_install(&sandbox, "rectangle", "1.0", "Rectangle.app");
+    let caskroom = sandbox.prefix.join("Caskroom/rectangle");
+    let before = tree(&caskroom);
+
+    let out = sandbox
+        .cmd()
+        .env(
+            "HOMEBREW_CASK_OPTS",
+            format!("--appdir={}", sandbox.home.join("Applications").display()),
+        )
+        .args(["uninstall", "--cask", "--dry-run", "rectangle"])
+        .output()
+        .expect("run fastbrew");
+    let stdout = support::strip_ansi(&String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "uninstall --dry-run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("==> Would uninstall Cask rectangle"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Would purge files for version 1.0 of Cask rectangle"),
+        "{stdout}"
+    );
+
+    assert!(app.is_dir(), "the dry run removed {}", app.display());
+    assert_eq!(tree(&caskroom), before, "the dry run changed the Caskroom");
 }
 
 #[test]

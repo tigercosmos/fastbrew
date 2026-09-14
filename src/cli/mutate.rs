@@ -224,7 +224,12 @@ pub fn uninstall(ctx: &Ctx, args: &UninstallArgs) -> Result<()> {
         crate::ops::uninstall::uninstall_formulae(&ctx.cfg, index, &formulae, &opts)?;
     }
     if !casks.is_empty() {
-        crate::cask::uninstall::uninstall_casks(&ctx.cfg, index, &casks, args.zap, args.force)?;
+        let opts = crate::cask::uninstall::CaskUninstallOptions {
+            zap: args.zap,
+            force: args.force,
+            dry_run: args.dry_run,
+        };
+        crate::cask::uninstall::uninstall_casks(&ctx.cfg, index, &casks, opts)?;
     }
     Ok(())
 }

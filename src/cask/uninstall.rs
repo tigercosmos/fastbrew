@@ -11,12 +11,22 @@ use super::config::CaskDirs;
 use super::install;
 use super::{InstalledCask, unpack};
 
+/// Flags of one `brew uninstall --cask` run.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CaskUninstallOptions {
+    /// `--zap`: reverse the artifacts and remove every staged version.
+    pub zap: bool,
+    /// `--force`: keep going when a removal fails, and remove an uninstalled cask.
+    pub force: bool,
+    /// `--dry-run`: only list what would be removed (`cmd/uninstall.rb`).
+    pub dry_run: bool,
+}
+
 pub fn uninstall_casks(
     cfg: &Config,
     index: &Index,
     tokens: &[String],
-    zap: bool,
-    force: bool,
+    opts: CaskUninstallOptions,
 ) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
     for token in tokens {
@@ -29,18 +39,21 @@ pub fn uninstall_casks(
             .unwrap_or_else(|| super::token_from_full_token(token).to_string());
 
         let Some(installed) = super::installed_cask(cfg, &cask_token) else {
-            if force {
+            if opts.force {
                 continue;
             }
             errors.push(format!("Cask '{cask_token}' is not installed."));
             continue;
         };
 
-        let _lock = crate::keg::lock::lock_cask(cfg, &cask_token)?;
+        // A dry run changes nothing, so it needs no lock.
+        let _lock = if opts.dry_run {
+            None
+        } else {
+            Some(crate::keg::lock::lock_cask(cfg, &cask_token)?)
+        };
         let dirs = CaskDirs::read_or_resolve(cfg, &installed.config_path(), &[]);
-        if let Err(error) =
-            uninstall_installed_cask(cfg, &dirs, &installed, entry.as_ref(), zap, force)
-        {
+        if let Err(error) = uninstall_installed_cask(cfg, &dirs, &installed, entry.as_ref(), opts) {
             errors.push(error.to_string());
         }
     }
@@ -60,17 +73,25 @@ pub fn uninstall_installed_cask(
     dirs: &CaskDirs,
     installed: &InstalledCask,
     entry: Option<&CaskEntry>,
-    zap: bool,
-    force: bool,
+    opts: CaskUninstallOptions,
 ) -> Result<()> {
     let specs = install::installed_specs(cfg, dirs, installed, entry);
     let ctx = install::installed_context(installed);
-    let opts = ArtifactOptions {
-        force,
+    let artifact_opts = ArtifactOptions {
+        force: opts.force,
+        dry_run: opts.dry_run,
         ..ArtifactOptions::default()
     };
 
-    output::ohai(&format!("Uninstalling Cask {}", installed.token));
+    output::ohai(&format!(
+        "{} Cask {}",
+        if opts.dry_run {
+            "Would uninstall"
+        } else {
+            "Uninstalling"
+        },
+        installed.token
+    ));
     if specs.is_empty() && entry.is_none() {
         output::opoo(&format!(
             "No uninstall artifact metadata is available for Cask '{}'.\nHomebrew will remove its records, but files installed by the Cask may remain.",
@@ -78,8 +99,26 @@ pub fn uninstall_installed_cask(
         ));
     }
 
-    let result = super::artifacts::uninstall_specs(cfg, dirs, &specs, &ctx, zap, opts);
-    if result.is_err() && !force {
+    let result =
+        super::artifacts::uninstall_specs(cfg, dirs, &specs, &ctx, opts.zap, artifact_opts);
+    if result.is_err() && !opts.force {
+        return result;
+    }
+
+    if opts.dry_run {
+        // Nothing above this point touched the disk either: only report the
+        // records and staged files a real uninstall would purge.
+        if opts.zap {
+            output::ohai(&format!(
+                "Would remove all staged versions of Cask '{}'",
+                installed.token
+            ));
+        } else {
+            output::ohai(&format!(
+                "Would purge files for version {} of Cask {}",
+                installed.version, installed.token
+            ));
+        }
         return result;
     }
 
@@ -88,7 +127,7 @@ pub fn uninstall_installed_cask(
     let _ = std::fs::remove_file(installed.config_path());
     let _ = std::fs::remove_file(installed.download_sha_path());
 
-    if zap {
+    if opts.zap {
         output::ohai(&format!(
             "Removing all staged versions of Cask '{}'",
             installed.token
@@ -103,7 +142,7 @@ pub fn uninstall_installed_cask(
         let _ = std::fs::remove_dir_all(installed.metadata_versioned_path());
         let _ = std::fs::remove_dir(&metadata_dir);
         let _ = std::fs::remove_dir(&installed.caskroom_path);
-        if force {
+        if opts.force {
             let _ = unpack::remove_path(&installed.caskroom_path);
         }
     }

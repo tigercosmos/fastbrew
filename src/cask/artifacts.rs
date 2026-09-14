@@ -654,6 +654,13 @@ fn move_back(
     let source = artifact_source(ctx, spec)?;
     let target = artifact_target(cfg, dirs, ctx, spec)?;
 
+    if opts.dry_run {
+        if path_occupied(&target) {
+            output::ohai(&format!("Would remove {name} '{}'", target.display()));
+        }
+        return Ok(());
+    }
+
     // The install left a symlink behind; remove it before restoring.
     if source.is_symlink()
         && std::fs::read_link(&source)
@@ -846,6 +853,7 @@ fn unlink_artifact(
     dirs: &CaskDirs,
     spec: &ArtifactSpec,
     ctx: &CaskContext,
+    opts: ArtifactOptions,
 ) -> Result<()> {
     let target = artifact_target(cfg, dirs, ctx, spec)?;
     if !target.is_symlink() {
@@ -854,11 +862,12 @@ fn unlink_artifact(
     if conflicting_formula(cfg, &target).is_some() {
         return Ok(());
     }
-    output::ohai(&format!(
-        "Unlinking {} '{}'",
-        english_name(&spec.kind),
-        target.display()
-    ));
+    let name = english_name(&spec.kind);
+    if opts.dry_run {
+        output::ohai(&format!("Would unlink {name} '{}'", target.display()));
+        return Ok(());
+    }
+    output::ohai(&format!("Unlinking {name} '{}'", target.display()));
     let _ = std::fs::remove_file(&target);
     Ok(())
 }
@@ -1379,13 +1388,15 @@ fn uninstall_one(
         return move_back(cfg, dirs, spec, ctx, opts, skip);
     }
     if SYMLINKED_KINDS.contains(&kind) {
-        return unlink_artifact(cfg, dirs, spec, ctx);
+        return unlink_artifact(cfg, dirs, spec, ctx, opts);
     }
     match kind {
         "uninstall" => {
             dispatch_uninstall(cfg, spec, ctx, opts, DispatchMode::Uninstall)?;
             dispatch_uninstall(cfg, spec, ctx, opts, DispatchMode::PostUninstall)
         }
+        "preflight_steps" | "postflight_steps" if opts.dry_run => Ok(()),
+        "uninstall_preflight_steps" | "uninstall_postflight_steps" if opts.dry_run => Ok(()),
         "preflight_steps" | "postflight_steps" => run_steps(cfg, dirs, spec, ctx, Phase::Uninstall),
         "uninstall_preflight_steps" | "uninstall_postflight_steps" => {
             run_steps(cfg, dirs, spec, ctx, Phase::Install)
@@ -1415,6 +1426,12 @@ fn uninstall_one(
                 .unwrap_or_else(|| ctx.token.clone());
             for shell in shells {
                 if let Some(path) = completion_path(cfg, dirs, &shell, &base_name) {
+                    if opts.dry_run {
+                        if path.exists() {
+                            output::ohai(&format!("Would remove completion '{}'", path.display()));
+                        }
+                        continue;
+                    }
                     let _ = std::fs::remove_file(path);
                 }
             }
@@ -1594,7 +1611,11 @@ fn run_directive(
             if paths.is_empty() {
                 return Ok(());
             }
-            output::ohai("Removing files:");
+            output::ohai(if opts.dry_run {
+                "Would remove files:"
+            } else {
+                "Removing files:"
+            });
             for path in paths {
                 println!("{}", printable(cfg, &path));
                 if !opts.dry_run {
@@ -1608,7 +1629,11 @@ fn run_directive(
             if paths.is_empty() {
                 return Ok(());
             }
-            output::ohai("Trashing files:");
+            output::ohai(if opts.dry_run {
+                "Would trash files:"
+            } else {
+                "Trashing files:"
+            });
             for path in &paths {
                 println!("{}", printable(cfg, path));
             }
@@ -1629,7 +1654,11 @@ fn run_directive(
             if paths.is_empty() {
                 return Ok(());
             }
-            output::ohai("Removing directories if empty:");
+            output::ohai(if opts.dry_run {
+                "Would remove directories if empty:"
+            } else {
+                "Removing directories if empty:"
+            });
             for path in paths {
                 println!("{}", printable(cfg, &path));
                 if !opts.dry_run {

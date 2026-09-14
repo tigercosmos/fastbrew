@@ -370,6 +370,11 @@ skipped when discovering installed casks.
 `Would install cask <token> <version>`, or `Would upgrade <token> <old> -> <new>`
 when the cask is installed and outdated; `upgrade --cask` prints
 `==> Would upgrade N outdated packages:` (`Cask::Upgrade.show_upgrade_summary`).
+Homebrew's `brew uninstall` has no `--dry-run` switch, so fastbrew's cask wording
+is its own: `==> Would uninstall Cask <token>`, `Would remove <kind> '<path>'`
+per artifact, then `==> Would purge files for version <version> of Cask <token>`
+(`==> Would remove all staged versions of Cask '<token>'` under `--zap`).
+
 ## 7. Services
 
 Plist path in the keg: `$CELLAR/<name>/<version>/homebrew.mxcl.<name>.plist` (label `homebrew.mxcl.<name>`; `service_name_args[":macos"]` overrides both). Homebrew also writes `homebrew.<name>.service` (systemd) into the keg, and `homebrew.<name>.timer` for `:cron`/`:interval` services.
