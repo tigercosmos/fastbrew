@@ -1971,6 +1971,77 @@ fn make_tap_remote(dir: &Path) {
     assert!(git(dir, &["commit", "--quiet", "-m", "Add scenario"]));
 }
 
+/// `upgrade` of a formula that ships no bottle is the Ruby `brew`'s job, just
+/// like `install` and `fetch` of it: the delegation must happen before the
+/// upgrade header is printed and must not be folded into an `ofail` line
+/// (`<name>: <name>: no bottle available!`). A dry run needs no bottle and
+/// stays native.
+#[test]
+fn upgrading_a_formula_without_a_bottle_delegates() {
+    let env = env_or_skip!();
+    let remote = tempfile::tempdir().expect("tempdir");
+    make_tap_remote(remote.path());
+    let url = format!("file://{}", remote.path().display());
+    let out = env.run(&["tap", "tiger/local", &url]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // An older keg whose receipt points at the tap, so `outdated` sees 1.0.
+    let keg = env.sandbox.prefix.join("Cellar/scenario/0.9");
+    std::fs::create_dir_all(&keg).expect("mkdir keg");
+    std::fs::write(
+        keg.join("INSTALL_RECEIPT.json"),
+        serde_json::json!({
+            "installed_on_request": true,
+            "installed_as_dependency": false,
+            "source": {"tap": "tiger/local", "spec": "stable",
+                       "versions": {"stable": "0.9", "head": null, "version_scheme": 0}}
+        })
+        .to_string(),
+    )
+    .expect("write receipt");
+    let outdated = env.stdout(&["outdated", "--verbose"]);
+    assert!(
+        outdated.contains("scenario (0.9) < 1.0"),
+        "the fixture must be outdated for the test to mean anything:\n{outdated}"
+    );
+
+    let dry = env.run(&["upgrade", "--dry-run", "scenario"]);
+    assert!(
+        dry.status.success(),
+        "a dry run needs no bottle:\n{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let stdout = support::strip_ansi(&String::from_utf8_lossy(&dry.stdout));
+    assert!(stdout.contains("scenario 0.9 -> 1.0"), "{stdout}");
+
+    for args in [&["upgrade", "scenario"][..], &["upgrade"][..]] {
+        let out = env.run(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = support::strip_ansi(&String::from_utf8_lossy(&out.stderr));
+        let stdout = support::strip_ansi(&String::from_utf8_lossy(&out.stdout));
+        assert!(
+            stderr.contains("refusing to delegate to brew (scenario: no bottle available!)"),
+            "{args:?}: the delegation names the reason:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("scenario: scenario:"),
+            "{args:?}: the reason is not wrapped in an ofail line:\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("Upgrading"),
+            "{args:?}: nothing is printed before handing over to brew:\n{stdout}"
+        );
+    }
+    assert!(
+        env.sandbox.prefix.join("Cellar/scenario/0.9").is_dir(),
+        "the old keg is untouched"
+    );
+}
+
 /// A tap whose remote has gone away is `Fetching <dir> failed!`, and it makes
 /// the whole `update` fail instead of reporting "Already up-to-date."
 /// (`cmd/update.sh`'s `HOMEBREW_UPDATE_FAILED`).

@@ -12,6 +12,7 @@ use crate::keg;
 use crate::model::FormulaEntry;
 use crate::ops::install::{self, InstallOptions, Mode, pluralize};
 use crate::ops::outdated::{self, OutdatedFormula};
+use crate::ops::plan;
 use crate::output;
 
 #[derive(Debug, Clone, Default)]
@@ -50,6 +51,39 @@ pub fn upgrade_formulae(
     }
 
     let (pinned, upgradeable): (Vec<_>, Vec<_>) = outdated.into_iter().partition(|f| f.pinned);
+
+    // The formula to upgrade each rack to: the entry the user named, else the
+    // one the rack's receipt points at. Resolving everything up front, and
+    // checking that a bottle exists, means a formula only the Ruby `brew` can
+    // build (no bottle for this platform, a tap formula `rubylite` cannot
+    // read) hands the whole command over before any output or any keg is
+    // touched. `brew upgrade` then re-derives the outdated set itself. A dry
+    // run needs no bottle, exactly as Homebrew's does not.
+    let mut targets: Vec<(&OutdatedFormula, FormulaEntry)> = Vec::new();
+    for formula in &upgradeable {
+        let entry = match roots.iter().find(|r| r.name == formula.name) {
+            Some(root) => root.clone(),
+            None => match crate::resolve::resolve_installed(cfg, index, &formula.name) {
+                Ok(entry) => entry,
+                Err(e @ Error::NeedsDelegation { .. }) => return Err(e),
+                Err(e) => {
+                    failures.push(format!("{}: {e}", formula.name));
+                    continue;
+                }
+            },
+        };
+        if !opts.dry_run {
+            match plan::require_bottle(cfg, &entry) {
+                Ok(_) => {}
+                Err(e @ Error::NeedsDelegation { .. }) => return Err(e),
+                Err(e) => {
+                    failures.push(format!("{}: {e}", formula.name));
+                    continue;
+                }
+            }
+        }
+        targets.push((formula, entry));
+    }
 
     if upgradeable.is_empty() {
         if !opts.quiet {
@@ -95,19 +129,7 @@ pub fn upgrade_formulae(
         return finish(failures);
     }
 
-    for formula in &upgradeable {
-        // The formula to upgrade to: the entry the user named, else the one
-        // this rack's receipt points at.
-        let entry = match roots.iter().find(|r| r.name == formula.name) {
-            Some(root) => root.clone(),
-            None => match crate::resolve::resolve_installed(cfg, index, &formula.name) {
-                Ok(entry) => entry,
-                Err(e) => {
-                    failures.push(format!("{}: {e}", formula.name));
-                    continue;
-                }
-            },
-        };
+    for (formula, entry) in targets {
         if !opts.quiet {
             output::ohai(&format!("Upgrading {}", formula.name));
             // `Upgrade.print_upgrade_message` joins the (empty) option list
@@ -131,6 +153,9 @@ pub fn upgrade_formulae(
         );
         match result {
             Ok(()) => migrate_pin(cfg, &formula.name),
+            // A dependency without a bottle surfaces here, past the root
+            // check above: still the Ruby `brew`'s job, not an `ofail`.
+            Err(e @ Error::NeedsDelegation { .. }) => return Err(e),
             Err(e) => failures.push(format!("{}: {e}", formula.name)),
         }
     }
